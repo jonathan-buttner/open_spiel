@@ -91,15 +91,29 @@ class ForcetekiState(pyspiel.State):
 
   def _legal_actions(self, player):
     del player
-    return list(self._state["legalActions"])
+    legal_actions = self._state.get("legalActions", [])
+    if legal_actions and isinstance(legal_actions[0], dict):
+      return list(range(len(legal_actions)))
+    return list(legal_actions)
 
   def _apply_action(self, action):
-    self._state = self._worker.request("step", {"action": int(action)})
+    self._apply_forceteki_action(self._forceteki_action_for_open_spiel_action(
+        int(action)))
+
+  def _apply_forceteki_action(self, action):
+    self._state = self._worker.request("step", {"action": action})
     self._move_number += 1
 
   def _action_to_string(self, player, action):
     del player
-    return self._state.get("actionStrings", {}).get(str(int(action)), str(action))
+    action = int(action)
+    action_strings = self._state.get("actionStrings", {})
+    if str(action) in action_strings:
+      return action_strings[str(action)]
+    legal_action = self.forceteki_legal_action(action)
+    if isinstance(legal_action, dict):
+      return str(legal_action.get("label") or legal_action.get("id") or action)
+    return str(legal_action)
 
   def is_terminal(self):
     return bool(self._state["isTerminal"]) or (
@@ -107,6 +121,37 @@ class ForcetekiState(pyspiel.State):
 
   def returns(self):
     return [float(value) for value in self._state["returns"]]
+
+  def forceteki_terminal_reason(self):
+    if bool(self._state["isTerminal"]):
+      return "forceteki_terminal"
+    if self._move_number >= self._max_game_length:
+      return "open_spiel_cap"
+    return "non_terminal"
+
+  def forceteki_move_number(self):
+    return self._move_number
+
+  def forceteki_legal_action(self, action):
+    """Returns the structured Forceteki action behind an OpenSpiel action id."""
+    return self._forceteki_action_for_open_spiel_action(int(action))
+
+  def forceteki_legal_actions(self):
+    """Returns structured legal actions keyed by OpenSpiel action id."""
+    return {
+        int(action): self.forceteki_legal_action(action)
+        for action in self.legal_actions()
+    }
+
+  def _forceteki_action_for_open_spiel_action(self, action):
+    legal_actions = self._state.get("legalActions", [])
+    if legal_actions and isinstance(legal_actions[0], dict):
+      if action < 0 or action >= len(legal_actions):
+        raise ValueError(
+            f"Illegal Forceteki action slot {action}. "
+            f"Legal slots are: {list(range(len(legal_actions)))}")
+      return legal_actions[action]
+    return int(action)
 
   def observation_tensor(self, player=None):
     if player is None:
@@ -137,7 +182,10 @@ class ForcetekiState(pyspiel.State):
       checkpoint = self._worker.request("export_checkpoint")
       clone = ForcetekiState(self.get_game(), self._params)
       for action in checkpoint.get("actionHistory", []):
-        clone.apply_action(int(action))
+        if isinstance(action, dict):
+          clone._apply_forceteki_action(action)
+        else:
+          clone.apply_action(int(action))
       return clone
 
     checkpoint = self._worker.request("export_checkpoint")

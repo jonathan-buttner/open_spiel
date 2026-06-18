@@ -34,6 +34,8 @@ class ForcetekiTest(absltest.TestCase):
     state = game.new_initial_state()
 
     self.assertFalse(state.is_terminal())
+    self.assertEqual(state.forceteki_terminal_reason(), "non_terminal")
+    self.assertEqual(state.forceteki_move_number(), 0)
     self.assertNotEmpty(state.legal_actions())
     self.assertLen(state.observation_tensor(state.current_player()), 4096)
 
@@ -44,6 +46,15 @@ class ForcetekiTest(absltest.TestCase):
     self.assertIn("legal_actions", timestep.observations)
     self.assertNotEmpty(timestep.observations["legal_actions"][0])
     self.close_forceteki_states(state, env._state)
+
+  def test_terminal_reason_reports_open_spiel_cap(self):
+    game = pyspiel.load_game("python_forceteki_swu", {"max_game_length": 0})
+    state = game.new_initial_state()
+
+    self.assertTrue(state.is_terminal())
+    self.assertEqual(state.forceteki_terminal_reason(), "open_spiel_cap")
+    self.assertEqual(state.forceteki_move_number(), 0)
+    self.close_forceteki_states(state)
 
   def assert_forceteki_states_equal(self, left, right):
     self.assertEqual(str(left), str(right))
