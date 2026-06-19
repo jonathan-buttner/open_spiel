@@ -14,6 +14,7 @@ meta-game estimates and meta-strategies.
 import hashlib
 import itertools
 import os
+import signal
 import time
 
 from absl import app
@@ -125,6 +126,13 @@ def _state_payload(state):
   return getattr(state, "_state", {}).get("state", {})
 
 
+def _prompt_payload(state, player_id):
+  if not player_id:
+    return {}
+  return _state_payload(state).get("players", {}).get(player_id, {}).get(
+      "prompt", {})
+
+
 def _raw_action(legal_action):
   if not isinstance(legal_action, dict):
     return {}
@@ -139,6 +147,22 @@ def _legal_action_map(state):
   if legal_actions and isinstance(legal_actions[0], dict):
     return {slot: legal_action for slot, legal_action in enumerate(legal_actions)}
   return {int(action): int(action) for action in state.legal_actions()}
+
+
+def _close_state(state):
+  close = getattr(state, "close", None)
+  if close is not None:
+    close()
+
+
+def _install_cleanup_signal_handlers():
+  def _handle_signal(signum, _frame):
+    if signum == signal.SIGINT:
+      raise KeyboardInterrupt
+    raise SystemExit(128 + signum)
+
+  signal.signal(signal.SIGINT, _handle_signal)
+  signal.signal(signal.SIGTERM, _handle_signal)
 
 
 class ForcetekiActionFactorizer:
@@ -165,8 +189,18 @@ class ForcetekiActionFactorizer:
       }
 
     raw = _raw_action(legal_action)
-    intent = legal_action.get("intent") or raw.get("intent")
     kind = legal_action.get("kind") or raw.get("kind")
+    card = legal_action.get("card") or {}
+    prompt = _prompt_payload(state, raw.get("playerId") or
+                             legal_action.get("playerId"))
+    intent = {
+        "kind": kind,
+        "buttonArg": raw.get("buttonArg"),
+        "buttonText": raw.get("buttonText"),
+        "cardSelected": card.get("selected"),
+        "cardZone": card.get("zone"),
+        "promptType": prompt.get("promptType"),
+    }
     control = {
         "kind": raw.get("kind") or kind,
         "command": raw.get("command"),
@@ -175,10 +209,13 @@ class ForcetekiActionFactorizer:
         "buttonText": raw.get("buttonText"),
         "value": raw.get("value"),
         "statefulPromptType": raw.get("statefulPromptType"),
-      }
+        "promptTitle": prompt.get("promptTitle"),
+        "promptType": prompt.get("promptType"),
+        "cardSelected": card.get("selected"),
+    }
     card_uuid = (
         raw.get("cardUuid") or
-        (legal_action.get("card") or {}).get("uuid") or
+        card.get("uuid") or
         legal_action.get("sourceCardUuid"))
     return {
         "intent": _stable_bucket(intent, self.intent_vocab_size),
@@ -624,30 +661,33 @@ class ForcetekiPPOOracle(rl_oracle.RLOracle):
         if isinstance(agent, ForcetekiPPOPolicy) and not agent.is_frozen()
     ]
 
-    while not state.is_terminal():
-      if state.is_chance_node():
-        outcomes, probs = zip(*state.chance_outcomes())
-        state.apply_action(utils.random_choice(outcomes, probs))
-        continue
+    try:
+      while not state.is_terminal():
+        if state.is_chance_node():
+          outcomes, probs = zip(*state.chance_outcomes())
+          state.apply_action(utils.random_choice(outcomes, probs))
+          continue
 
-      player = state.current_player()
-      agent = agents[player]
-      if isinstance(agent, ForcetekiPPOPolicy) and not agent.is_frozen():
-        action = agent.training_action(state)
-      else:
-        action_probs = agent(state, player)
-        outcomes, probs = zip(*action_probs.items())
-        action = utils.random_choice(outcomes, probs)
+        player = state.current_player()
+        agent = agents[player]
+        if isinstance(agent, ForcetekiPPOPolicy) and not agent.is_frozen():
+          action = agent.training_action(state)
+        else:
+          action_probs = agent(state, player)
+          outcomes, probs = zip(*action_probs.items())
+          action = utils.random_choice(outcomes, probs)
 
-      state.apply_action(action)
-      rewards = state.returns() if state.is_terminal() else state.rewards()
-      if not rewards:
-        rewards = [0.0] * state.num_players()
+        state.apply_action(action)
+        rewards = state.returns() if state.is_terminal() else state.rewards()
+        if not rewards:
+          rewards = [0.0] * state.num_players()
+        for live_agent in live_agents:
+          live_agent.add_pending_reward(rewards[live_agent.player_id])
+
       for live_agent in live_agents:
-        live_agent.add_pending_reward(rewards[live_agent.player_id])
-
-    for live_agent in live_agents:
-      live_agent.finish_episode()
+        live_agent.finish_episode()
+    finally:
+      _close_state(state)
 
 
 def _sample_episode_with_diagnostics(state, policies):
@@ -790,8 +830,12 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
     nonzero_returns = 0
 
     for _ in range(num_episodes):
-      returns, reason, move_number = _sample_episode_with_diagnostics(
-          self._game.new_initial_state(), policies)
+      state = self._game.new_initial_state()
+      try:
+        returns, reason, move_number = _sample_episode_with_diagnostics(
+            state, policies)
+      finally:
+        _close_state(state)
       totals += returns.reshape(-1)
       reason_counts[reason] = reason_counts.get(reason, 0) + 1
       move_numbers.append(move_number)
@@ -986,15 +1030,22 @@ def main(argv):
   if FLAGS.forceteki_seed:
     os.environ["FORCETEKI_SEED"] = FLAGS.forceteki_seed
 
-  game = pyspiel.load_game_as_turn_based(
-      FLAGS.game_name,
-      {
-          "players": FLAGS.n_players,
-          "max_game_length": FLAGS.max_episode_steps,
-      })
-  env = rl_environment.Environment(game)
-  oracle, agents = init_oracle(env)
-  run_psro(env, oracle, agents)
+  env = None
+  _install_cleanup_signal_handlers()
+  try:
+    game = pyspiel.load_game_as_turn_based(
+        FLAGS.game_name,
+        {
+            "players": FLAGS.n_players,
+            "max_game_length": FLAGS.max_episode_steps,
+        })
+    env = rl_environment.Environment(game)
+    oracle, agents = init_oracle(env)
+    run_psro(env, oracle, agents)
+  finally:
+    if env is not None:
+      _close_state(getattr(env, "_state", None))
+    forceteki.close_all_workers()
 
 
 if __name__ == "__main__":

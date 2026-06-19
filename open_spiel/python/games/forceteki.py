@@ -8,6 +8,7 @@
 
 """Forceteki Star Wars: Unlimited RL environment wrapper."""
 
+import atexit
 import json
 import os
 import subprocess
@@ -21,6 +22,8 @@ _NUM_PLAYERS = 2
 _NUM_DISTINCT_ACTIONS = 512
 _OBSERVATION_TENSOR_SIZE = 4096
 _DEFAULT_MAX_GAME_LENGTH = 1000
+_RECENT_ACTION_KEY_LIMIT = 12
+_LIVE_WORKERS = set()
 
 _GAME_TYPE = pyspiel.GameType(
     short_name="python_forceteki_swu",
@@ -71,7 +74,8 @@ class ForcetekiGame(pyspiel.Game):
 class ForcetekiState(pyspiel.State):
   """Mutable OpenSpiel state backed by a long-lived Forceteki worker."""
 
-  def __init__(self, game, params, checkpoint=None, move_number=0):
+  def __init__(self, game, params, checkpoint=None, move_number=0,
+               recent_action_keys=None):
     super().__init__(game)
     self._params = dict(params)
     self._worker = _NodeWorker(params)
@@ -83,6 +87,7 @@ class ForcetekiState(pyspiel.State):
     self._move_number = move_number
     self._max_game_length = int(params.get("max_game_length",
                                            _DEFAULT_MAX_GAME_LENGTH))
+    self._recent_action_keys = list(recent_action_keys or [])
 
   def current_player(self):
     if self.is_terminal():
@@ -91,14 +96,20 @@ class ForcetekiState(pyspiel.State):
 
   def _legal_actions(self, player):
     del player
+    return self._loop_safe_legal_actions()
+
+  def _all_legal_actions(self):
     legal_actions = self._state.get("legalActions", [])
     if legal_actions and isinstance(legal_actions[0], dict):
       return list(range(len(legal_actions)))
     return list(legal_actions)
 
   def _apply_action(self, action):
-    self._apply_forceteki_action(self._forceteki_action_for_open_spiel_action(
-        int(action)))
+    action = int(action)
+    action_key = self._action_loop_key(action)
+    self._apply_forceteki_action(
+        self._forceteki_action_for_open_spiel_action(action))
+    self._remember_action_key(action_key)
 
   def _apply_forceteki_action(self, action):
     self._state = self._worker.request("step", {"action": action})
@@ -134,7 +145,11 @@ class ForcetekiState(pyspiel.State):
 
   def forceteki_legal_action(self, action):
     """Returns the structured Forceteki action behind an OpenSpiel action id."""
-    return self._forceteki_action_for_open_spiel_action(int(action))
+    action = int(action)
+    legal_decision = self._legal_decision_for_action(action)
+    if legal_decision is not None:
+      return legal_decision
+    return self._forceteki_action_for_open_spiel_action(action)
 
   def forceteki_legal_actions(self):
     """Returns structured legal actions keyed by OpenSpiel action id."""
@@ -152,6 +167,86 @@ class ForcetekiState(pyspiel.State):
             f"Legal slots are: {list(range(len(legal_actions)))}")
       return legal_actions[action]
     return int(action)
+
+  def _legal_decision_for_action(self, action):
+    legal_decisions = self._state.get("legalDecisions", [])
+    for decision in legal_decisions:
+      if isinstance(decision, dict) and int(decision.get("actionId", -1)) == action:
+        return decision
+    if 0 <= action < len(legal_decisions):
+      decision = legal_decisions[action]
+      if isinstance(decision, dict):
+        return decision
+    return None
+
+  def _loop_safe_legal_actions(self):
+    legal_actions = self._all_legal_actions()
+    if not legal_actions:
+      return []
+
+    forward_actions = [
+        action for action in legal_actions
+        if not self._is_backtracking_action(action)
+    ]
+    if forward_actions:
+      legal_actions = forward_actions
+
+    fresh_actions = [
+        action for action in legal_actions
+        if self._action_loop_key(action) not in self._recent_action_keys
+    ]
+    if fresh_actions:
+      return fresh_actions
+    return legal_actions
+
+  def _is_backtracking_action(self, action):
+    decision = self._legal_decision_for_action(action)
+    if not isinstance(decision, dict):
+      return False
+
+    raw = self._raw_decision(decision)
+    kind = decision.get("kind") or raw.get("kind")
+    card = decision.get("card") or {}
+    if kind in ("card-click", "display-card") and bool(card.get("selected")):
+      return True
+
+    button_arg = str(raw.get("buttonArg", "")).lower()
+    button_text = str(raw.get("buttonText", decision.get("label", ""))).lower()
+    return kind == "prompt-button" and (
+        button_arg == "cancel" or button_text == "cancel")
+
+  def _action_loop_key(self, action):
+    decision = self._legal_decision_for_action(action)
+    state = self._state.get("state", {})
+    player_id = self._state.get("currentPlayerId")
+    if player_id is None and isinstance(decision, dict):
+      player_id = decision.get("playerId")
+    prompt = {}
+    if player_id:
+      prompt = state.get("players", {}).get(player_id, {}).get("prompt", {})
+    decision_id = (
+        decision.get("id") if isinstance(decision, dict) else str(action))
+    return json.dumps({
+        "phase": state.get("phase"),
+        "roundNumber": state.get("roundNumber"),
+        "actionNumber": state.get("actionNumber"),
+        "playerId": player_id,
+        "prompt": {
+            "menuTitle": prompt.get("menuTitle"),
+            "promptTitle": prompt.get("promptTitle"),
+            "promptType": prompt.get("promptType"),
+        },
+        "decisionId": decision_id,
+    }, sort_keys=True)
+
+  def _remember_action_key(self, action_key):
+    if not action_key:
+      return
+    self._recent_action_keys.append(action_key)
+    del self._recent_action_keys[:-_RECENT_ACTION_KEY_LIMIT]
+
+  def _raw_decision(self, legal_action):
+    return legal_action.get("rawAction") or legal_action.get("rawDecision") or {}
 
   def observation_tensor(self, player=None):
     if player is None:
@@ -186,6 +281,7 @@ class ForcetekiState(pyspiel.State):
           clone._apply_forceteki_action(action)
         else:
           clone.apply_action(int(action))
+      clone._recent_action_keys = list(self._recent_action_keys)
       return clone
 
     checkpoint = self._worker.request("export_checkpoint")
@@ -193,16 +289,21 @@ class ForcetekiState(pyspiel.State):
         self.get_game(),
         self._params,
         checkpoint=checkpoint,
-        move_number=self._move_number)
+        move_number=self._move_number,
+        recent_action_keys=self._recent_action_keys)
 
   def __deepcopy__(self, memo):
     del memo
     return self.clone()
 
-  def __del__(self):
+  def close(self):
     worker = getattr(self, "_worker", None)
     if worker is not None:
       worker.close()
+      self._worker = None
+
+  def __del__(self):
+    self.close()
 
 
 class ForcetekiObserver:
@@ -237,6 +338,7 @@ class _NodeWorker:
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1)
+    _LIVE_WORKERS.add(self)
 
   def request(self, op: str, params: dict[str, Any] | None = None):
     self._seq += 1
@@ -259,22 +361,34 @@ class _NodeWorker:
   def close(self):
     process = getattr(self, "_process", None)
     if process is None:
+      _LIVE_WORKERS.discard(self)
       return
-    if process.poll() is None:
-      try:
-        self.request("close", {})
-      except (BrokenPipeError, RuntimeError, json.JSONDecodeError):
-        pass
-      process.terminate()
-      try:
-        process.wait(timeout=1)
-      except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=1)
-    for stream in (process.stdin, process.stdout, process.stderr):
-      if stream is not None:
-        stream.close()
-    self._process = None
+    try:
+      if process.poll() is None:
+        try:
+          self.request("close", {})
+        except (BrokenPipeError, RuntimeError, json.JSONDecodeError):
+          pass
+        process.terminate()
+        try:
+          process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+          process.kill()
+          process.wait(timeout=1)
+      for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+          try:
+            stream.close()
+          except OSError:
+            pass
+    finally:
+      self._process = None
+      _LIVE_WORKERS.discard(self)
+
+
+def close_all_workers():
+  for worker in list(_LIVE_WORKERS):
+    worker.close()
 
 
 def _forceteki_path(params):
@@ -306,4 +420,5 @@ def _reset_params(params):
   return reset
 
 
+atexit.register(close_all_workers)
 pyspiel.register_game(_GAME_TYPE, ForcetekiGame)
