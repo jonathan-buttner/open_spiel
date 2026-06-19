@@ -9,9 +9,12 @@
 """Forceteki Star Wars: Unlimited RL environment wrapper."""
 
 import atexit
+import contextlib
+import contextvars
 import json
 import os
 import subprocess
+import threading
 from typing import Any
 
 import numpy as np
@@ -24,6 +27,10 @@ _OBSERVATION_TENSOR_SIZE = 4096
 _DEFAULT_MAX_GAME_LENGTH = 1000
 _RECENT_ACTION_KEY_LIMIT = 12
 _LIVE_WORKERS = set()
+_TRACE_PATH_ENV = "FORCETEKI_TRACE_PATH"
+_TRACE_CONTEXT = contextvars.ContextVar("forceteki_trace_context", default={})
+_TRACE_LOCK = threading.Lock()
+_TRACE_GLOBAL_ACTION_COUNT = 0
 
 _GAME_TYPE = pyspiel.GameType(
     short_name="python_forceteki_swu",
@@ -52,6 +59,18 @@ _GAME_INFO = pyspiel.GameInfo(
     max_utility=1.0,
     utility_sum=0.0,
     max_game_length=_DEFAULT_MAX_GAME_LENGTH)
+
+
+@contextlib.contextmanager
+def forceteki_trace_context(**metadata):
+  """Adds metadata to Forceteki trace entries written in this context."""
+  previous = _TRACE_CONTEXT.get()
+  update = {key: value for key, value in metadata.items() if value is not None}
+  token = _TRACE_CONTEXT.set({**previous, **update})
+  try:
+    yield
+  finally:
+    _TRACE_CONTEXT.reset(token)
 
 
 class ForcetekiGame(pyspiel.Game):
@@ -107,9 +126,15 @@ class ForcetekiState(pyspiel.State):
   def _apply_action(self, action):
     action = int(action)
     action_key = self._action_loop_key(action)
-    self._apply_forceteki_action(
-        self._forceteki_action_for_open_spiel_action(action))
+    trace_path = _trace_path(self._params)
+    pre_state = self._state
+    legal_action_map = self.forceteki_legal_actions() if trace_path else {}
+    forceteki_action = self._forceteki_action_for_open_spiel_action(action)
+    self._apply_forceteki_action(forceteki_action)
     self._remember_action_key(action_key)
+    if trace_path:
+      self._append_trace_entry(
+          trace_path, action, legal_action_map, pre_state)
 
   def _apply_forceteki_action(self, action):
     self._state = self._worker.request("step", {"action": action})
@@ -248,6 +273,49 @@ class ForcetekiState(pyspiel.State):
   def _raw_decision(self, legal_action):
     return legal_action.get("rawAction") or legal_action.get("rawDecision") or {}
 
+  def _append_trace_entry(self, trace_path, action, legal_action_map,
+                          pre_worker_state):
+    global _TRACE_GLOBAL_ACTION_COUNT
+    with _TRACE_LOCK:
+      _TRACE_GLOBAL_ACTION_COUNT += 1
+      global_action_count = _TRACE_GLOBAL_ACTION_COUNT
+      entry = self._trace_entry(
+          global_action_count, action, legal_action_map, pre_worker_state)
+      _write_trace_entry(trace_path, entry)
+
+  def _trace_entry(self, global_action_count, action, legal_action_map,
+                   pre_worker_state):
+    pre_state = pre_worker_state.get("state", {})
+    post_state = self._state.get("state", {})
+    player_id = (
+        pre_worker_state.get("currentPlayerId") or
+        _action_player_id(legal_action_map.get(action)) or
+        _state_active_player_id(pre_state))
+    return {
+        "globalActionCount": global_action_count,
+        "actionCount": self._move_number,
+        "moveNumber": self._move_number,
+        "rolloutContext": dict(_TRACE_CONTEXT.get()),
+        "decisionPlayerId": player_id,
+        "openSpielCurrentPlayer": pre_worker_state.get("currentPlayer"),
+        "turnNumber": pre_state.get("roundNumber"),
+        "phase": pre_state.get("phase"),
+        "preDecisionState": pre_state,
+        "stateView": _build_state_view(pre_state, player_id),
+        "legalActions": _trace_legal_actions(legal_action_map),
+        "rawLegalActions": pre_worker_state.get("legalActions", []),
+        "rawLegalDecisions": pre_worker_state.get("legalDecisions", []),
+        "chosenAction": _trace_action(action, legal_action_map.get(action)),
+        "postActionSnapshot": post_state,
+        "postAction": {
+            "currentPlayer": self._state.get("currentPlayer"),
+            "currentPlayerId": self._state.get("currentPlayerId"),
+            "isTerminal": bool(self._state.get("isTerminal")),
+            "terminalReason": self.forceteki_terminal_reason(),
+            "returns": self.returns(),
+        },
+    }
+
   def observation_tensor(self, player=None):
     if player is None:
       player = self.current_player()
@@ -321,6 +389,122 @@ class ForcetekiObserver:
   def string_from(self, state, player):
     del player
     return str(state)
+
+
+def _trace_path(params):
+  return str(params.get("trace_path") or os.environ.get(_TRACE_PATH_ENV) or "")
+
+
+def _write_trace_entry(trace_path, entry):
+  directory = os.path.dirname(trace_path)
+  if directory:
+    os.makedirs(directory, exist_ok=True)
+  with open(trace_path, "a", encoding="utf-8") as trace_file:
+    json.dump(entry, trace_file, separators=(",", ":"), sort_keys=True)
+    trace_file.write("\n")
+
+
+def _trace_legal_actions(legal_action_map):
+  return [
+      _trace_action(action, legal_action_map[action])
+      for action in sorted(legal_action_map)
+  ]
+
+
+def _trace_action(action, legal_action):
+  action_id = int(action)
+  if isinstance(legal_action, dict):
+    traced = dict(legal_action)
+    traced["actionId"] = action_id
+    return traced
+  return {
+      "actionId": action_id,
+      "value": legal_action,
+  }
+
+
+def _action_player_id(legal_action):
+  if not isinstance(legal_action, dict):
+    return None
+  raw = legal_action.get("rawAction") or legal_action.get("rawDecision") or {}
+  return legal_action.get("playerId") or raw.get("playerId")
+
+
+def _state_active_player_id(state):
+  return state.get("activePlayerId")
+
+
+def _build_state_view(state, player_id):
+  if not isinstance(state, dict) or not player_id:
+    return {}
+  players = state.get("players", {})
+  player = players.get(player_id)
+  if not isinstance(player, dict):
+    return {"playerId": player_id}
+  opponent_id = next(
+      (candidate for candidate in sorted(players) if candidate != player_id),
+      None)
+  opponent = players.get(opponent_id, {}) if opponent_id else {}
+  prompt = player.get("prompt", {})
+  return {
+      "playerId": player_id,
+      "opponentId": opponent_id,
+      "turnNumber": state.get("roundNumber"),
+      "phase": state.get("phase"),
+      "initiativePlayerId": state.get("initiativePlayerId"),
+      "myBaseHealth": _base_health(player.get("base")),
+      "opponentBaseHealth": _base_health(opponent.get("base")),
+      "myResourcesAvailable": player.get("availableResources"),
+      "myResourcesTotal": player.get("resourcesTotal"),
+      "opponentResourcesAvailable": opponent.get("availableResources"),
+      "opponentResourcesTotal": opponent.get("resourcesTotal"),
+      "myHandCount": player.get("handCount"),
+      "opponentHandCount": opponent.get("handCount"),
+      "myDeckCount": player.get("deckCount"),
+      "opponentDeckCount": opponent.get("deckCount"),
+      "myDiscardCount": player.get("discardCount"),
+      "opponentDiscardCount": opponent.get("discardCount"),
+      "myUnits": _zone_cards(player, ("groundArena", "spaceArena")),
+      "opponentUnits": _zone_cards(opponent, ("groundArena", "spaceArena")),
+      "myHand": _zone_cards(player, ("hand",)),
+      "myDiscard": _zone_cards(player, ("discard",)),
+      "opponentDiscard": _zone_cards(opponent, ("discard",)),
+      "menuTitle": prompt.get("menuTitle"),
+      "promptTitle": prompt.get("promptTitle"),
+      "promptType": prompt.get("promptType"),
+  }
+
+
+def _zone_cards(player, zones):
+  cards = []
+  if not isinstance(player, dict):
+    return cards
+  for zone in zones:
+    cards.extend(_card_view(card) for card in player.get(zone, []))
+  return cards
+
+
+def _card_view(card):
+  if not isinstance(card, dict):
+    return card
+  keys = (
+      "uuid", "id", "name", "zone", "damage", "hp", "remainingHp", "power",
+      "cost", "controllerId", "ownerId", "type", "printedType", "arena",
+      "aspects", "traits", "keywords", "exhausted", "selectable", "selected")
+  view = {key: card.get(key) for key in keys if key in card}
+  if "name" not in view and "internalName" in card:
+    view["name"] = card.get("internalName")
+  return view
+
+
+def _base_health(base):
+  if not isinstance(base, dict):
+    return None
+  if isinstance(base.get("remainingHp"), (int, float)):
+    return base.get("remainingHp")
+  if isinstance(base.get("hp"), (int, float)):
+    return base.get("hp") - (base.get("damage") or 0)
+  return None
 
 
 class _NodeWorker:

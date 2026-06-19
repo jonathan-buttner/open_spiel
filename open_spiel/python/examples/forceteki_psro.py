@@ -16,6 +16,8 @@ import itertools
 import os
 import signal
 import time
+from datetime import datetime
+from datetime import timezone
 
 from absl import app
 from absl import flags
@@ -108,6 +110,10 @@ flags.DEFINE_integer("ppo_card_vocab_size", 256,
 
 flags.DEFINE_integer("seed", 1, "Numpy seed.")
 flags.DEFINE_bool("verbose", True, "Print iteration details.")
+flags.DEFINE_bool("debug", False,
+                  "Write Forceteki decision trace entries to trace.ndjson.")
+flags.DEFINE_string("debug_dir", "forceteki_psro_debug",
+                    "Directory used for timestamped --debug trace runs.")
 
 _INVALID_LOGIT = -1e9
 _NONE_TOKEN = 0
@@ -163,6 +169,15 @@ def _install_cleanup_signal_handlers():
 
   signal.signal(signal.SIGINT, _handle_signal)
   signal.signal(signal.SIGTERM, _handle_signal)
+
+
+def _debug_trace_path():
+  timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+  timestamp = timestamp.replace("+00:00", "Z").replace(":", "-")
+  debug_run_dir = os.path.join(
+      FLAGS.debug_dir, f"{timestamp}_{os.getpid()}")
+  os.makedirs(debug_run_dir, exist_ok=True)
+  return os.path.join(debug_run_dir, "trace.ndjson")
 
 
 class ForcetekiActionFactorizer:
@@ -642,7 +657,23 @@ class ForcetekiPPOPolicy(policy.Policy):
         self._num_actions)
 
 
-class ForcetekiPPOOracle(rl_oracle.RLOracle):
+class ForcetekiTraceRLOracle(rl_oracle.RLOracle):
+  """RL oracle that marks base PG/DQN training rollouts in Forceteki traces."""
+
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._forceteki_trace_training_rollout = 0
+
+  def _rollout(self, game, agents, **oracle_specific_execution_kwargs):
+    self._forceteki_trace_training_rollout += 1
+    with forceteki.forceteki_trace_context(
+        rolloutType="training",
+        trainingRollout=self._forceteki_trace_training_rollout):
+      return super()._rollout(
+          game, agents, **oracle_specific_execution_kwargs)
+
+
+class ForcetekiPPOOracle(ForcetekiTraceRLOracle):
   """PSRO oracle that trains factored Forceteki PPO responders."""
 
   def __call__(self, *args, **kwargs):
@@ -655,6 +686,7 @@ class ForcetekiPPOOracle(rl_oracle.RLOracle):
 
   def _rollout(self, game, agents, **oracle_specific_execution_kwargs):
     del oracle_specific_execution_kwargs
+    self._forceteki_trace_training_rollout += 1
     state = game.new_initial_state()
     live_agents = [
         agent for agent in agents
@@ -662,30 +694,33 @@ class ForcetekiPPOOracle(rl_oracle.RLOracle):
     ]
 
     try:
-      while not state.is_terminal():
-        if state.is_chance_node():
-          outcomes, probs = zip(*state.chance_outcomes())
-          state.apply_action(utils.random_choice(outcomes, probs))
-          continue
+      with forceteki.forceteki_trace_context(
+          rolloutType="training",
+          trainingRollout=self._forceteki_trace_training_rollout):
+        while not state.is_terminal():
+          if state.is_chance_node():
+            outcomes, probs = zip(*state.chance_outcomes())
+            state.apply_action(utils.random_choice(outcomes, probs))
+            continue
 
-        player = state.current_player()
-        agent = agents[player]
-        if isinstance(agent, ForcetekiPPOPolicy) and not agent.is_frozen():
-          action = agent.training_action(state)
-        else:
-          action_probs = agent(state, player)
-          outcomes, probs = zip(*action_probs.items())
-          action = utils.random_choice(outcomes, probs)
+          player = state.current_player()
+          agent = agents[player]
+          if isinstance(agent, ForcetekiPPOPolicy) and not agent.is_frozen():
+            action = agent.training_action(state)
+          else:
+            action_probs = agent(state, player)
+            outcomes, probs = zip(*action_probs.items())
+            action = utils.random_choice(outcomes, probs)
 
-        state.apply_action(action)
-        rewards = state.returns() if state.is_terminal() else state.rewards()
-        if not rewards:
-          rewards = [0.0] * state.num_players()
+          state.apply_action(action)
+          rewards = state.returns() if state.is_terminal() else state.rewards()
+          if not rewards:
+            rewards = [0.0] * state.num_players()
+          for live_agent in live_agents:
+            live_agent.add_pending_reward(rewards[live_agent.player_id])
+
         for live_agent in live_agents:
-          live_agent.add_pending_reward(rewards[live_agent.player_id])
-
-      for live_agent in live_agents:
-        live_agent.finish_episode()
+          live_agent.finish_episode()
     finally:
       _close_state(state)
 
@@ -829,11 +864,15 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
     move_numbers = []
     nonzero_returns = 0
 
-    for _ in range(num_episodes):
+    for sim_index in range(num_episodes):
       state = self._game.new_initial_state()
       try:
-        returns, reason, move_number = _sample_episode_with_diagnostics(
-            state, policies)
+        with forceteki.forceteki_trace_context(
+            rolloutType="evaluation",
+            profileIndex=list(profile_index),
+            simulationIndex=sim_index):
+          returns, reason, move_number = _sample_episode_with_diagnostics(
+              state, policies)
       finally:
         _close_state(state)
       totals += returns.reshape(-1)
@@ -888,7 +927,7 @@ def init_pg_responder(env):
       "num_critic_before_pi": FLAGS.num_q_before_pi,
       "optimizer_str": FLAGS.optimizer_str,
   }
-  oracle = rl_oracle.RLOracle(
+  oracle = ForcetekiTraceRLOracle(
       env,
       agent_class,
       agent_kwargs,
@@ -917,7 +956,7 @@ def init_dqn_responder(env):
       "learn_every": FLAGS.learn_every,
       "optimizer_str": FLAGS.optimizer_str,
   }
-  oracle = rl_oracle.RLOracle(
+  oracle = ForcetekiTraceRLOracle(
       env,
       agent_class,
       agent_kwargs,
@@ -1011,7 +1050,7 @@ def run_psro(env, oracle, agents):
       prd_gamma=1e-10,
       sample_from_marginals=True,
       symmetric_game=FLAGS.symmetric_game,
-      rollout_diagnostics=FLAGS.rollout_diagnostics)
+      rollout_diagnostics=FLAGS.rollout_diagnostics or FLAGS.debug)
 
   start_time = time.time()
   print_solver_summary(solver, 0, time.time() - start_time)
@@ -1029,6 +1068,10 @@ def main(argv):
   np.random.seed(FLAGS.seed)
   if FLAGS.forceteki_seed:
     os.environ["FORCETEKI_SEED"] = FLAGS.forceteki_seed
+  if FLAGS.debug:
+    trace_path = _debug_trace_path()
+    os.environ["FORCETEKI_TRACE_PATH"] = trace_path
+    print(f"Forceteki debug trace: {trace_path}")
 
   env = None
   _install_cleanup_signal_handlers()

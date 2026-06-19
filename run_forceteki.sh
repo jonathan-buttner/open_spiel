@@ -10,4 +10,5 @@ export FORCETEKI_PATH=/Users/jbuttner/proj/home/forceteki
   --gpsro_iterations=2 \
   --number_training_episodes=20 \
   --sims_per_entry=5 \
-  --verbose=True
+  --verbose=True \
+  --debug=True

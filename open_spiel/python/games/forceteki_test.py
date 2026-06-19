@@ -3,12 +3,137 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import copy
+import json
+import os
+import tempfile
 
 from absl.testing import absltest
 
 from open_spiel.python import rl_environment
 from open_spiel.python.games import forceteki  # pylint: disable=unused-import
 import pyspiel
+
+
+def _fake_worker_state(terminal=False):
+  return {
+      "currentPlayer": -4 if terminal else 0,
+      "currentPlayerId": None if terminal else "player-0",
+      "isTerminal": terminal,
+      "legalActions": [] if terminal else [0, 1],
+      "legalDecisions": [] if terminal else [
+          {
+              "actionId": 0,
+              "id": "button:pass",
+              "playerId": "player-0",
+              "kind": "prompt-button",
+              "label": "Pass",
+              "rawDecision": {
+                  "kind": "prompt-button",
+                  "playerId": "player-0",
+                  "buttonArg": "pass",
+                  "buttonText": "Pass",
+              },
+          },
+          {
+              "actionId": 1,
+              "id": "card:attack",
+              "playerId": "player-0",
+              "kind": "card-click",
+              "label": "Click Unit",
+              "card": {
+                  "uuid": "Card_1",
+                  "id": "unit-1",
+                  "name": "Unit One",
+                  "zone": "groundArena",
+                  "controllerId": "player-0",
+                  "type": "basicUnit",
+                  "exhausted": False,
+                  "selectable": True,
+              },
+              "rawDecision": {
+                  "kind": "card-click",
+                  "playerId": "player-0",
+                  "cardUuid": "Card_1",
+              },
+          },
+      ],
+      "returns": [1, -1] if terminal else [0, 0],
+      "observationTensors": [[0.0] * 4096, [0.0] * 4096],
+      "state": {
+          "gameId": "fake-game",
+          "phase": "action",
+          "roundNumber": 2,
+          "actionNumber": 3 if terminal else 2,
+          "activePlayerId": None if terminal else "player-0",
+          "initiativePlayerId": "player-0",
+          "isComplete": terminal,
+          "winnerNames": ["player0"] if terminal else [],
+          "players": {
+              "player-0": {
+                  "id": "player-0",
+                  "name": "player0",
+                  "hasInitiative": True,
+                  "isActivePlayer": not terminal,
+                  "availableResources": 1,
+                  "resourcesTotal": 2,
+                  "handCount": 3,
+                  "deckCount": 45,
+                  "discardCount": 0,
+                  "base": {"remainingHp": 30},
+                  "hand": [],
+                  "discard": [],
+                  "resources": [],
+                  "groundArena": [{"uuid": "Card_1", "name": "Unit One"}],
+                  "spaceArena": [],
+                  "prompt": {
+                      "menuTitle": "Choose an action",
+                      "promptTitle": "Action Window",
+                      "promptType": "actionWindow",
+                  },
+              },
+              "player-1": {
+                  "id": "player-1",
+                  "name": "player1",
+                  "hasInitiative": False,
+                  "isActivePlayer": False,
+                  "availableResources": 0,
+                  "resourcesTotal": 2,
+                  "handCount": 4,
+                  "deckCount": 44,
+                  "discardCount": 1,
+                  "base": {"hp": 33, "damage": 5},
+                  "hand": [],
+                  "discard": [{"uuid": "Card_2", "name": "Discarded"}],
+                  "resources": [],
+                  "groundArena": [],
+                  "spaceArena": [],
+                  "prompt": {},
+              },
+          },
+      },
+  }
+
+
+class FakeNodeWorker:
+
+  def __init__(self, params):
+    self.params = params
+    self._process = None
+
+  def request(self, op, params=None):
+    del params
+    if op in ("reset", "restore_checkpoint"):
+      return _fake_worker_state(terminal=False)
+    if op == "step":
+      return _fake_worker_state(terminal=True)
+    if op == "export_checkpoint":
+      return {"actionHistory": []}
+    if op == "close":
+      return {"closed": True}
+    raise ValueError(op)
+
+  def close(self):
+    self._process = None
 
 
 def _without_prompt_uuids(value):
@@ -25,13 +150,27 @@ def _without_prompt_uuids(value):
 
 class ForcetekiTest(absltest.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    self._original_trace_path = os.environ.pop("FORCETEKI_TRACE_PATH", None)
+    forceteki._TRACE_GLOBAL_ACTION_COUNT = 0
+
   def tearDown(self):
     forceteki.close_all_workers()
+    if self._original_trace_path is not None:
+      os.environ["FORCETEKI_TRACE_PATH"] = self._original_trace_path
+    else:
+      os.environ.pop("FORCETEKI_TRACE_PATH", None)
     super().tearDown()
 
   def close_forceteki_states(self, *states):
     for state in states:
       state.close()
+
+  def patch_node_worker(self):
+    original_worker = forceteki._NodeWorker
+    forceteki._NodeWorker = FakeNodeWorker
+    self.addCleanup(lambda: setattr(forceteki, "_NodeWorker", original_worker))
 
   def overwrite_state_for_legal_action_test(self, state, legal_decisions):
     state._state = {
@@ -218,6 +357,53 @@ class ForcetekiTest(absltest.TestCase):
 
     self.assertEqual(clone._recent_action_keys, ["recent-key"])
     self.close_forceteki_states(state, clone)
+
+  def test_trace_file_is_not_created_when_debug_disabled(self):
+    self.patch_node_worker()
+    trace_path = os.path.join(tempfile.mkdtemp(), "trace.ndjson")
+    game = pyspiel.load_game("python_forceteki_swu")
+    state = game.new_initial_state()
+
+    state.apply_action(1)
+
+    self.assertFalse(os.path.exists(trace_path))
+    self.close_forceteki_states(state)
+
+  def test_trace_file_records_decision_and_choice(self):
+    self.patch_node_worker()
+    trace_path = os.path.join(tempfile.mkdtemp(), "trace.ndjson")
+    os.environ["FORCETEKI_TRACE_PATH"] = trace_path
+    game = pyspiel.load_game("python_forceteki_swu")
+    state = game.new_initial_state()
+
+    with forceteki.forceteki_trace_context(
+        rolloutType="evaluation", profileIndex=[1, 0], simulationIndex=2):
+      state.apply_action(1)
+
+    with open(trace_path, encoding="utf-8") as trace_file:
+      entries = [json.loads(line) for line in trace_file]
+
+    self.assertLen(entries, 1)
+    entry = entries[0]
+    self.assertEqual(entry["rolloutContext"]["rolloutType"], "evaluation")
+    self.assertEqual(entry["decisionPlayerId"], "player-0")
+    self.assertEqual(entry["phase"], "action")
+    self.assertEqual(entry["turnNumber"], 2)
+    self.assertEqual(entry["preDecisionState"]["gameId"], "fake-game")
+    self.assertEqual(entry["postActionSnapshot"]["isComplete"], True)
+    self.assertEqual(entry["stateView"]["myBaseHealth"], 30)
+    self.assertEqual(entry["stateView"]["opponentBaseHealth"], 28)
+    self.assertEqual(entry["chosenAction"]["actionId"], 1)
+    self.assertEqual(entry["chosenAction"]["id"], "card:attack")
+    self.assertTrue(any(
+        action["actionId"] == entry["chosenAction"]["actionId"]
+        for action in entry["legalActions"]))
+    self.assertEqual(entry["rawLegalActions"], [0, 1])
+    self.assertNotIn("observationTensor", entry)
+    self.assertNotIn("observationTensors", entry)
+    self.assertEqual(entry["postAction"]["terminalReason"],
+                     "forceteki_terminal")
+    self.close_forceteki_states(state)
 
   def test_state_close_is_idempotent(self):
     game = pyspiel.load_game("python_forceteki_swu")
