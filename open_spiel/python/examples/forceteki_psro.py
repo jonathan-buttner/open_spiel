@@ -57,6 +57,13 @@ flags.DEFINE_integer("n_players", 2, "The number of players.")
 flags.DEFINE_string("forceteki_seed", "", "Optional Forceteki worker seed.")
 flags.DEFINE_integer("max_episode_steps", 1000,
                      "OpenSpiel-side cap for Forceteki rollout length.")
+flags.DEFINE_integer("forceteki_worker_pool_size", 0,
+                     "Max reusable Forceteki Node workers. Zero disables "
+                     "worker pooling.")
+flags.DEFINE_integer("parallel_eval_workers", 1,
+                     "Threads used for evaluation rollouts. Values greater "
+                     "than one require --forceteki_worker_pool_size to be at "
+                     "least this large.")
 
 flags.DEFINE_string("meta_strategy_method", "uniform",
                     "Meta-strategy method: uniform, nash, alpharank, or prd.")
@@ -132,6 +139,15 @@ def main(argv):
     raise app.UsageError("Too many command-line arguments.")
   if FLAGS.n_players != 2:
     raise app.UsageError("Forceteki SWU only supports --n_players=2")
+  if FLAGS.parallel_eval_workers < 1:
+    raise app.UsageError("--parallel_eval_workers must be at least 1")
+  if FLAGS.forceteki_worker_pool_size < 0:
+    raise app.UsageError("--forceteki_worker_pool_size must be non-negative")
+  if (FLAGS.parallel_eval_workers > 1 and
+      FLAGS.forceteki_worker_pool_size < FLAGS.parallel_eval_workers):
+    raise app.UsageError(
+        "--parallel_eval_workers > 1 requires "
+        "--forceteki_worker_pool_size >= --parallel_eval_workers")
 
   np.random.seed(FLAGS.seed)
   if FLAGS.forceteki_seed:
@@ -149,6 +165,7 @@ def main(argv):
         {
             "players": FLAGS.n_players,
             "max_game_length": FLAGS.max_episode_steps,
+            "worker_pool_size": FLAGS.forceteki_worker_pool_size,
         })
     env = rl_environment.Environment(game)
     oracle, agents = init_oracle(env, FLAGS)

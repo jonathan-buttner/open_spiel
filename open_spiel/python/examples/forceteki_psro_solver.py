@@ -4,25 +4,45 @@
 
 """Diagnostic PSRO solver for the Forceteki PSRO example."""
 
+import concurrent.futures
+import contextlib
+import hashlib
 import itertools
+import random
+import threading
 
 import numpy as np
 
 from open_spiel.python.algorithms.psro_v2 import psro_v2
-from open_spiel.python.algorithms.psro_v2 import utils
 from open_spiel.python.examples.forceteki_psro_utils import _close_state
 from open_spiel.python.games import forceteki
 
 
-def _sample_episode_with_diagnostics(state, policies):
+def _random_choice(outcomes, probabilities, rng):
+  cumsum = np.cumsum(probabilities)
+  return outcomes[np.searchsorted(cumsum / cumsum[-1], rng.random())]
+
+
+def _rollout_seed(base_seed, profile_index, simulation_index):
+  encoded = repr((int(base_seed), tuple(profile_index), int(simulation_index)))
+  digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+  return int(digest[:16], 16)
+
+
+def _sample_episode_with_diagnostics(state, policies, rng=None,
+                                     policy_locks=None):
   """Samples one episode and returns final returns plus rollout diagnostics."""
+  rng = rng or random
+  policy_locks = policy_locks or {}
   while not state.is_terminal():
     if state.is_simultaneous_node():
       actions = [None] * state.num_players()
       for player in range(state.num_players()):
-        state_policy = policies[player](state, player)
+        policy = policies[player]
+        with policy_locks.get(id(policy), contextlib.nullcontext()):
+          state_policy = policy(state, player)
         outcomes, probs = zip(*state_policy.items())
-        actions[player] = utils.random_choice(outcomes, probs)
+        actions[player] = _random_choice(outcomes, probs, rng)
       state.apply_actions(actions)
       continue
 
@@ -30,10 +50,12 @@ def _sample_episode_with_diagnostics(state, policies):
       outcomes, probs = zip(*state.chance_outcomes())
     else:
       player = state.current_player()
-      state_policy = policies[player](state)
+      policy = policies[player]
+      with policy_locks.get(id(policy), contextlib.nullcontext()):
+        state_policy = policy(state)
       outcomes, probs = zip(*state_policy.items())
 
-    state.apply_action(utils.random_choice(outcomes, probs))
+    state.apply_action(_random_choice(outcomes, probs, rng))
 
   returns = np.array(state.returns(), dtype=np.float32)
   reason = getattr(
@@ -48,8 +70,11 @@ def _sample_episode_with_diagnostics(state, policies):
 class DiagnosticPSROSolver(psro_v2.PSROSolver):
   """PSRO solver that can print ForceTeki rollout diagnostics per meta entry."""
 
-  def __init__(self, *args, rollout_diagnostics=False, **kwargs):
+  def __init__(self, *args, rollout_diagnostics=False, parallel_eval_workers=1,
+               seed=1, **kwargs):
     self._rollout_diagnostics = rollout_diagnostics
+    self._parallel_eval_workers = max(1, int(parallel_eval_workers))
+    self._seed = int(seed)
     super().__init__(*args, **kwargs)
 
   def update_empirical_gamestate(self, seed=None):
@@ -152,29 +177,51 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
     }
     move_numbers = []
     nonzero_returns = 0
+    policy_locks = {id(policy): threading.Lock() for policy in policies}
 
-    for sim_index in range(num_episodes):
-      state = self._game.new_initial_state()
-      try:
-        with forceteki.forceteki_trace_context(
-            rolloutType="evaluation",
-            profileIndex=list(profile_index),
-            simulationIndex=sim_index):
-          returns, reason, move_number = _sample_episode_with_diagnostics(
-              state, policies)
-      finally:
-        _close_state(state)
-      totals += returns.reshape(-1)
-      reason_counts[reason] = reason_counts.get(reason, 0) + 1
-      move_numbers.append(move_number)
-      if np.any(returns != 0):
-        nonzero_returns += 1
+    if self._parallel_eval_workers > 1 and num_episodes > 1:
+      max_workers = min(self._parallel_eval_workers, num_episodes)
+      with concurrent.futures.ThreadPoolExecutor(
+          max_workers=max_workers) as executor:
+        results = executor.map(
+            lambda sim_index: self._sample_one_episode_with_diagnostics(
+                policies, profile_index, sim_index, policy_locks),
+            range(num_episodes))
+        for returns, reason, move_number in results:
+          totals += returns.reshape(-1)
+          reason_counts[reason] = reason_counts.get(reason, 0) + 1
+          move_numbers.append(move_number)
+          if np.any(returns != 0):
+            nonzero_returns += 1
+    else:
+      for sim_index in range(num_episodes):
+        returns, reason, move_number = self._sample_one_episode_with_diagnostics(
+            policies, profile_index, sim_index, policy_locks)
+        totals += returns.reshape(-1)
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        move_numbers.append(move_number)
+        if np.any(returns != 0):
+          nonzero_returns += 1
 
     averages = totals / num_episodes
     self._print_rollout_diagnostics(
         profile_index, num_episodes, averages, reason_counts, nonzero_returns,
         move_numbers)
     return averages
+
+  def _sample_one_episode_with_diagnostics(self, policies, profile_index,
+                                           sim_index, policy_locks):
+    rng = random.Random(_rollout_seed(self._seed, profile_index, sim_index))
+    state = self._game.new_initial_state()
+    try:
+      with forceteki.forceteki_trace_context(
+          rolloutType="evaluation",
+          profileIndex=list(profile_index),
+          simulationIndex=sim_index):
+        return _sample_episode_with_diagnostics(
+            state, policies, rng=rng, policy_locks=policy_locks)
+    finally:
+      _close_state(state)
 
   def _print_rollout_diagnostics(self, profile_index, num_episodes,
                                  averages, reason_counts, nonzero_returns,

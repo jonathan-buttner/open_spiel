@@ -3,8 +3,11 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import copy
+import concurrent.futures
 import json
 import os
+import queue
+import threading
 import tempfile
 
 from absl.testing import absltest
@@ -115,14 +118,28 @@ def _fake_worker_state(terminal=False):
 
 
 class FakeNodeWorker:
+  instances = []
+  fail_next_reset = False
+  _lock = threading.Lock()
 
   def __init__(self, params):
     self.params = params
-    self._process = None
+    self._process = object()
+    self.reset_count = 0
+    self.closed = False
+    with FakeNodeWorker._lock:
+      self.worker_id = len(FakeNodeWorker.instances)
+      FakeNodeWorker.instances.append(self)
 
   def request(self, op, params=None):
     del params
+    if self.closed:
+      raise RuntimeError("worker is closed")
     if op in ("reset", "restore_checkpoint"):
+      if op == "reset" and FakeNodeWorker.fail_next_reset:
+        FakeNodeWorker.fail_next_reset = False
+        raise RuntimeError("reset failed")
+      self.reset_count += 1
       return _fake_worker_state(terminal=False)
     if op == "step":
       return _fake_worker_state(terminal=True)
@@ -133,6 +150,7 @@ class FakeNodeWorker:
     raise ValueError(op)
 
   def close(self):
+    self.closed = True
     self._process = None
 
 
@@ -153,6 +171,8 @@ class ForcetekiTest(absltest.TestCase):
   def setUp(self):
     super().setUp()
     self._original_trace_path = os.environ.pop("FORCETEKI_TRACE_PATH", None)
+    self._original_pool_size = os.environ.pop(
+        "FORCETEKI_WORKER_POOL_SIZE", None)
     forceteki._TRACE_GLOBAL_ACTION_COUNT = 0
 
   def tearDown(self):
@@ -161,6 +181,10 @@ class ForcetekiTest(absltest.TestCase):
       os.environ["FORCETEKI_TRACE_PATH"] = self._original_trace_path
     else:
       os.environ.pop("FORCETEKI_TRACE_PATH", None)
+    if self._original_pool_size is not None:
+      os.environ["FORCETEKI_WORKER_POOL_SIZE"] = self._original_pool_size
+    else:
+      os.environ.pop("FORCETEKI_WORKER_POOL_SIZE", None)
     super().tearDown()
 
   def close_forceteki_states(self, *states):
@@ -169,6 +193,8 @@ class ForcetekiTest(absltest.TestCase):
 
   def patch_node_worker(self):
     original_worker = forceteki._NodeWorker
+    FakeNodeWorker.instances = []
+    FakeNodeWorker.fail_next_reset = False
     forceteki._NodeWorker = FakeNodeWorker
     self.addCleanup(lambda: setattr(forceteki, "_NodeWorker", original_worker))
 
@@ -429,6 +455,95 @@ class ForcetekiTest(absltest.TestCase):
     self.assertTrue(all(worker not in forceteki._LIVE_WORKERS
                         for worker in workers))
     self.close_forceteki_states(state, clone)
+
+  def test_worker_pool_size_zero_keeps_direct_worker_lifecycle(self):
+    self.patch_node_worker()
+    game = pyspiel.load_game("python_forceteki_swu", {"worker_pool_size": 0})
+
+    first = game.new_initial_state()
+    first_worker = first._worker
+    first.close()
+    second = game.new_initial_state()
+    second_worker = second._worker
+    second.close()
+
+    self.assertLen(FakeNodeWorker.instances, 2)
+    self.assertIsNot(first_worker, second_worker)
+    self.assertIsNone(first_worker._process)
+    self.assertIsNone(second_worker._process)
+
+  def test_worker_pool_reuses_worker_after_state_close(self):
+    self.patch_node_worker()
+    game = pyspiel.load_game("python_forceteki_swu", {"worker_pool_size": 1})
+
+    first = game.new_initial_state()
+    worker = first._worker
+    first.close()
+    second = game.new_initial_state()
+    second.close()
+
+    self.assertLen(FakeNodeWorker.instances, 1)
+    self.assertIsNone(second._worker)
+    self.assertEqual(worker.reset_count, 2)
+    self.assertIsNotNone(worker._process)
+
+  def test_worker_pool_never_exceeds_size_under_concurrent_checkout(self):
+    self.patch_node_worker()
+    game = pyspiel.load_game("python_forceteki_swu", {"worker_pool_size": 2})
+    started = queue.Queue()
+    release = threading.Event()
+
+    def hold_state():
+      state = game.new_initial_state()
+      try:
+        started.put(state._worker.worker_id)
+        release.wait(timeout=5)
+      finally:
+        state.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+      futures = [executor.submit(hold_state) for _ in range(4)]
+      first_batch = [started.get(timeout=2), started.get(timeout=2)]
+      with self.assertRaises(queue.Empty):
+        started.get(timeout=0.1)
+      self.assertLessEqual(len(FakeNodeWorker.instances), 2)
+      release.set()
+      concurrent.futures.wait(futures, timeout=5)
+
+    self.assertEqual(set(first_batch), {0, 1})
+    self.assertLessEqual(len(FakeNodeWorker.instances), 2)
+    self.assertTrue(all(future.done() for future in futures))
+    for future in futures:
+      future.result()
+
+  def test_worker_pool_discards_worker_after_reset_failure(self):
+    self.patch_node_worker()
+    FakeNodeWorker.fail_next_reset = True
+    game = pyspiel.load_game("python_forceteki_swu", {"worker_pool_size": 1})
+
+    with self.assertRaisesRegex(RuntimeError, "reset failed"):
+      game.new_initial_state()
+    failed_worker = FakeNodeWorker.instances[0]
+    state = game.new_initial_state()
+    replacement_worker = state._worker
+    state.close()
+
+    self.assertLen(FakeNodeWorker.instances, 2)
+    self.assertIsNone(failed_worker._process)
+    self.assertIsNot(failed_worker, replacement_worker)
+    self.assertIsNotNone(replacement_worker._process)
+
+  def test_close_all_workers_closes_pooled_idle_workers(self):
+    self.patch_node_worker()
+    game = pyspiel.load_game("python_forceteki_swu", {"worker_pool_size": 1})
+    state = game.new_initial_state()
+    worker = state._worker
+    state.close()
+
+    self.assertIsNotNone(worker._process)
+    forceteki.close_all_workers()
+
+    self.assertIsNone(worker._process)
 
   def test_explicit_close_removes_original_and_clone_workers(self):
     game = pyspiel.load_game("python_forceteki_swu")

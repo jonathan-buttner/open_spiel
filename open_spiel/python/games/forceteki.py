@@ -27,6 +27,8 @@ _OBSERVATION_TENSOR_SIZE = 4096
 _DEFAULT_MAX_GAME_LENGTH = 1000
 _RECENT_ACTION_KEY_LIMIT = 12
 _LIVE_WORKERS = set()
+_WORKER_POOLS = {}
+_WORKER_REGISTRY_LOCK = threading.Lock()
 _TRACE_PATH_ENV = "FORCETEKI_TRACE_PATH"
 _TRACE_CONTEXT = contextvars.ContextVar("forceteki_trace_context", default={})
 _TRACE_LOCK = threading.Lock()
@@ -49,6 +51,7 @@ _GAME_TYPE = pyspiel.GameType(
     parameter_specification={
         "players": _NUM_PLAYERS,
         "max_game_length": _DEFAULT_MAX_GAME_LENGTH,
+        "worker_pool_size": 0,
     })
 
 _GAME_INFO = pyspiel.GameInfo(
@@ -97,12 +100,21 @@ class ForcetekiState(pyspiel.State):
                recent_action_keys=None):
     super().__init__(game)
     self._params = dict(params)
-    self._worker = _NodeWorker(params)
-    if checkpoint is None:
-      self._state = self._worker.request("reset", _reset_params(params))
-    else:
-      self._state = self._worker.request("restore_checkpoint",
-                                         {"checkpoint": checkpoint})
+    self._worker_pool = _worker_pool(params)
+    self._worker_failed = False
+    self._worker = (
+        self._worker_pool.acquire() if self._worker_pool is not None
+        else _NodeWorker(params))
+    try:
+      if checkpoint is None:
+        self._state = self._request_worker("reset", _reset_params(params))
+      else:
+        self._state = self._request_worker("restore_checkpoint",
+                                           {"checkpoint": checkpoint})
+    except Exception:
+      self._worker_failed = True
+      self.close()
+      raise
     self._move_number = move_number
     self._max_game_length = int(params.get("max_game_length",
                                            _DEFAULT_MAX_GAME_LENGTH))
@@ -137,7 +149,7 @@ class ForcetekiState(pyspiel.State):
           trace_path, action, legal_action_map, pre_state)
 
   def _apply_forceteki_action(self, action):
-    self._state = self._worker.request("step", {"action": action})
+    self._state = self._request_worker("step", {"action": action})
     self._move_number += 1
 
   def _action_to_string(self, player, action):
@@ -342,7 +354,7 @@ class ForcetekiState(pyspiel.State):
                      os.environ.get("FORCETEKI_CLONE_MODE") or
                      "checkpoint")
     if clone_mode == "replay":
-      checkpoint = self._worker.request("export_checkpoint")
+      checkpoint = self._request_worker("export_checkpoint")
       clone = ForcetekiState(self.get_game(), self._params)
       for action in checkpoint.get("actionHistory", []):
         if isinstance(action, dict):
@@ -352,7 +364,7 @@ class ForcetekiState(pyspiel.State):
       clone._recent_action_keys = list(self._recent_action_keys)
       return clone
 
-    checkpoint = self._worker.request("export_checkpoint")
+    checkpoint = self._request_worker("export_checkpoint")
     return ForcetekiState(
         self.get_game(),
         self._params,
@@ -367,11 +379,23 @@ class ForcetekiState(pyspiel.State):
   def close(self):
     worker = getattr(self, "_worker", None)
     if worker is not None:
-      worker.close()
+      worker_pool = getattr(self, "_worker_pool", None)
+      if worker_pool is None:
+        worker.close()
+      else:
+        worker_pool.release(
+            worker, discard=getattr(self, "_worker_failed", False))
       self._worker = None
 
   def __del__(self):
     self.close()
+
+  def _request_worker(self, op, params=None):
+    try:
+      return self._worker.request(op, params)
+    except Exception:
+      self._worker_failed = True
+      raise
 
 
 class ForcetekiObserver:
@@ -522,7 +546,8 @@ class _NodeWorker:
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1)
-    _LIVE_WORKERS.add(self)
+    with _WORKER_REGISTRY_LOCK:
+      _LIVE_WORKERS.add(self)
 
   def request(self, op: str, params: dict[str, Any] | None = None):
     self._seq += 1
@@ -545,7 +570,8 @@ class _NodeWorker:
   def close(self):
     process = getattr(self, "_process", None)
     if process is None:
-      _LIVE_WORKERS.discard(self)
+      with _WORKER_REGISTRY_LOCK:
+        _LIVE_WORKERS.discard(self)
       return
     try:
       if process.poll() is None:
@@ -567,12 +593,106 @@ class _NodeWorker:
             pass
     finally:
       self._process = None
-      _LIVE_WORKERS.discard(self)
+      with _WORKER_REGISTRY_LOCK:
+        _LIVE_WORKERS.discard(self)
 
 
 def close_all_workers():
-  for worker in list(_LIVE_WORKERS):
+  with _WORKER_REGISTRY_LOCK:
+    pools = list(_WORKER_POOLS.values())
+    workers = list(_LIVE_WORKERS)
+    _WORKER_POOLS.clear()
+  for pool in pools:
+    pool.close()
+  for worker in workers:
     worker.close()
+
+
+class _NodeWorkerPool:
+  """Bounded process-local pool for reusable Forceteki Node workers."""
+
+  def __init__(self, params, size):
+    self._params = dict(params)
+    self._size = size
+    self._idle = []
+    self._live_count = 0
+    self._closed = False
+    self._condition = threading.Condition()
+
+  def acquire(self):
+    while True:
+      with self._condition:
+        if self._closed:
+          raise RuntimeError("Forceteki worker pool is closed")
+        if self._idle:
+          return self._idle.pop()
+        if self._live_count < self._size:
+          self._live_count += 1
+          break
+        self._condition.wait()
+    try:
+      return _NodeWorker(self._params)
+    except Exception:
+      with self._condition:
+        self._live_count -= 1
+        self._condition.notify()
+      raise
+
+  def release(self, worker, discard=False):
+    if worker is None:
+      return
+    should_close = discard
+    with self._condition:
+      if self._closed:
+        should_close = True
+      elif not should_close and getattr(worker, "_process", None) is not None:
+        self._idle.append(worker)
+        self._condition.notify()
+        return
+    worker.close()
+    with self._condition:
+      self._live_count = max(0, self._live_count - 1)
+      self._condition.notify()
+
+  def close(self):
+    with self._condition:
+      self._closed = True
+      idle = list(self._idle)
+      self._idle = []
+      self._live_count = max(0, self._live_count - len(idle))
+      self._condition.notify_all()
+    for worker in idle:
+      worker.close()
+
+
+def _worker_pool(params):
+  size = _worker_pool_size(params)
+  if size < 0:
+    raise ValueError("Forceteki worker_pool_size must be non-negative")
+  if size == 0:
+    return None
+  key = (_NodeWorker, _worker_path(params), _forceteki_path(params))
+  with _WORKER_REGISTRY_LOCK:
+    pool = _WORKER_POOLS.get(key)
+    if pool is None:
+      pool = _NodeWorkerPool(params, size)
+      _WORKER_POOLS[key] = pool
+    elif pool._size != size:  # pylint: disable=protected-access
+      existing_size = pool._size  # pylint: disable=protected-access
+      raise ValueError(
+          "Conflicting Forceteki worker_pool_size values for the same worker "
+          f"configuration: existing={existing_size}, requested={size}")
+    return pool
+
+
+def _worker_pool_size(params):
+  value = params.get("worker_pool_size")
+  if value is None:
+    value = os.environ.get("FORCETEKI_WORKER_POOL_SIZE", 0)
+  try:
+    return int(value)
+  except (TypeError, ValueError) as exc:
+    raise ValueError(f"Invalid Forceteki worker_pool_size: {value}") from exc
 
 
 def _forceteki_path(params):

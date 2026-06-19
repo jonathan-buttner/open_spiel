@@ -158,7 +158,9 @@ def run_psro(env, oracle, agents, flags_obj):
       prd_gamma=1e-10,
       sample_from_marginals=True,
       symmetric_game=flags_obj.symmetric_game,
-      rollout_diagnostics=flags_obj.rollout_diagnostics or flags_obj.debug)
+      rollout_diagnostics=flags_obj.rollout_diagnostics or flags_obj.debug,
+      parallel_eval_workers=flags_obj.parallel_eval_workers,
+      seed=flags_obj.seed)
 
   start_time = time.time()
   print_solver_summary(solver, 0, time.time() - start_time, flags_obj)

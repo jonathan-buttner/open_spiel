@@ -20,11 +20,17 @@ class ForcetekiTraceRLOracle(rl_oracle.RLOracle):
 
   def _rollout(self, game, agents, **oracle_specific_execution_kwargs):
     self._forceteki_trace_training_rollout += 1
-    with forceteki.forceteki_trace_context(
-        rolloutType="training",
-        trainingRollout=self._forceteki_trace_training_rollout):
-      return super()._rollout(
-          game, agents, **oracle_specific_execution_kwargs)
+    _close_state(getattr(self._env, "_state", None))
+    self._env._state = None  # pylint: disable=protected-access
+    try:
+      with forceteki.forceteki_trace_context(
+          rolloutType="training",
+          trainingRollout=self._forceteki_trace_training_rollout):
+        return super()._rollout(
+            game, agents, **oracle_specific_execution_kwargs)
+    finally:
+      _close_state(getattr(self._env, "_state", None))
+      self._env._state = None  # pylint: disable=protected-access
 
 
 class ForcetekiPPOOracle(ForcetekiTraceRLOracle):
