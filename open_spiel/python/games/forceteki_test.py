@@ -61,7 +61,7 @@ def _fake_worker_state(terminal=False):
           },
       ],
       "returns": [1, -1] if terminal else [0, 0],
-      "observationTensors": [[0.0] * 4096, [0.0] * 4096],
+      "observationTensors": [[0.0] * 32768, [0.0] * 32768],
       "state": {
           "gameId": "fake-game",
           "phase": "action",
@@ -206,7 +206,7 @@ class ForcetekiTest(absltest.TestCase):
         "legalActions": list(range(len(legal_decisions))),
         "legalDecisions": legal_decisions,
         "returns": [0, 0],
-        "observationTensors": [[0.0] * 4096, [0.0] * 4096],
+        "observationTensors": [[0.0] * 32768, [0.0] * 32768],
         "state": {
             "phase": "action",
             "roundNumber": 1,
@@ -232,7 +232,7 @@ class ForcetekiTest(absltest.TestCase):
     self.assertEqual(state.forceteki_terminal_reason(), "non_terminal")
     self.assertEqual(state.forceteki_move_number(), 0)
     self.assertNotEmpty(state.legal_actions())
-    self.assertLen(state.observation_tensor(state.current_player()), 4096)
+    self.assertLen(state.observation_tensor(state.current_player()), 32768)
     structured_actions = state.forceteki_legal_actions()
     self.assertNotEmpty(structured_actions)
     self.assertTrue(all(isinstance(action, dict)
