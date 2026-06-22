@@ -129,6 +129,10 @@ flags.DEFINE_integer("ppo_card_vocab_size", 256,
 
 flags.DEFINE_integer("seed", 1, "Numpy seed.")
 flags.DEFINE_bool("verbose", True, "Print iteration details.")
+flags.DEFINE_bool("progress", True,
+                  "Print line-based progress updates during PSRO runs.")
+flags.DEFINE_float("progress_interval_seconds", 30.0,
+                   "Minimum seconds between non-final progress updates.")
 flags.DEFINE_bool("debug", False,
                   "Write Forceteki decision trace entries to trace.ndjson.")
 flags.DEFINE_string("debug_dir", "forceteki_psro_debug",

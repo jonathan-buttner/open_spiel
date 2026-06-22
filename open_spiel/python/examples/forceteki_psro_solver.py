@@ -71,14 +71,23 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
   """PSRO solver that can print ForceTeki rollout diagnostics per meta entry."""
 
   def __init__(self, *args, rollout_diagnostics=False, parallel_eval_workers=1,
-               seed=1, **kwargs):
+               seed=1, progress_reporter=None, **kwargs):
     self._rollout_diagnostics = rollout_diagnostics
     self._parallel_eval_workers = max(1, int(parallel_eval_workers))
     self._seed = int(seed)
+    self._progress_reporter = progress_reporter
+    self._progress_iteration = None
+    self._progress_total_iterations = None
+    self._evaluation_rollouts_done = 0
+    self._evaluation_rollouts_total = 0
     super().__init__(*args, **kwargs)
 
+  def set_progress_context(self, iteration, total_iterations):
+    self._progress_iteration = iteration
+    self._progress_total_iterations = total_iterations
+
   def update_empirical_gamestate(self, seed=None):
-    if not self._rollout_diagnostics:
+    if not self._rollout_diagnostics and not self._progress_enabled():
       return super().update_empirical_gamestate(seed=seed)
 
     if seed is not None:
@@ -113,6 +122,19 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
         [slice(len(self._policies[k])) for k in range(self._num_players)])
     for k in range(self._num_players):
       meta_games[k][older_policies_slice] = self._meta_games[k]
+
+    self._evaluation_rollouts_done = 0
+    self._evaluation_rollouts_total = (
+        self._count_missing_profiles(meta_games, total_number_policies,
+                                     number_older_policies,
+                                     number_new_policies) *
+        self._sims_per_entry)
+    if self._progress_enabled():
+      self._progress_reporter.start(
+          "evaluation",
+          iteration=f"{self._progress_iteration}/"
+          f"{self._progress_total_iterations}",
+          rollouts=f"0/{self._evaluation_rollouts_total}")
 
     for current_player in range(self._num_players):
       range_iterators = [
@@ -156,6 +178,14 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
           for k in range(self._num_players):
             meta_games[k][used_tuple] = utility_estimates[k]
 
+    if self._progress_enabled():
+      self._progress_reporter.done(
+          "evaluation",
+          iteration=f"{self._progress_iteration}/"
+          f"{self._progress_total_iterations}",
+          rollouts=f"{self._evaluation_rollouts_done}/"
+          f"{self._evaluation_rollouts_total}")
+
     if self.symmetric_game:
       self._policies = [self._policies[0]]
       self._new_policies = [self._new_policies[0]]
@@ -193,6 +223,7 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
           move_numbers.append(move_number)
           if np.any(returns != 0):
             nonzero_returns += 1
+          self._evaluation_progress(profile_index)
     else:
       for sim_index in range(num_episodes):
         returns, reason, move_number = self._sample_one_episode_with_diagnostics(
@@ -202,12 +233,49 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
         move_numbers.append(move_number)
         if np.any(returns != 0):
           nonzero_returns += 1
+        self._evaluation_progress(profile_index)
 
     averages = totals / num_episodes
-    self._print_rollout_diagnostics(
-        profile_index, num_episodes, averages, reason_counts, nonzero_returns,
-        move_numbers)
+    if self._rollout_diagnostics:
+      self._print_rollout_diagnostics(
+          profile_index, num_episodes, averages, reason_counts, nonzero_returns,
+          move_numbers)
     return averages
+
+  def _count_missing_profiles(self, meta_games, total_number_policies,
+                              number_older_policies, number_new_policies):
+    count = 0
+    for current_player in range(self._num_players):
+      range_iterators = [
+          range(total_number_policies[k]) for k in range(current_player)
+      ] + [range(number_new_policies[current_player])] + [
+          range(total_number_policies[k])
+          for k in range(current_player + 1, self._num_players)
+      ]
+      for current_index in itertools.product(*range_iterators):
+        used_index = list(current_index)
+        used_index[current_player] += number_older_policies[current_player]
+        if np.isnan(meta_games[current_player][tuple(used_index)]):
+          count += 1
+    return count
+
+  def _evaluation_progress(self, profile_index):
+    if not self._progress_enabled():
+      return
+    self._evaluation_rollouts_done += 1
+    self._progress_reporter.update(
+        "evaluation",
+        "rollouts",
+        self._evaluation_rollouts_done,
+        self._evaluation_rollouts_total,
+        force=self._evaluation_rollouts_done >= self._evaluation_rollouts_total,
+        iteration=f"{self._progress_iteration}/"
+        f"{self._progress_total_iterations}",
+        profile=profile_index)
+
+  def _progress_enabled(self):
+    return (self._progress_reporter is not None and
+            self._progress_reporter.enabled)
 
   def _sample_one_episode_with_diagnostics(self, policies, profile_index,
                                            sim_index, policy_locks):

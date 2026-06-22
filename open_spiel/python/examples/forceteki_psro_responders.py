@@ -10,6 +10,7 @@ from absl import app
 
 from open_spiel.python.algorithms.psro_v2 import rl_policy
 from open_spiel.python.examples import forceteki_psro_artifacts
+from open_spiel.python.examples import forceteki_psro_progress
 from open_spiel.python.examples.forceteki_psro_oracles import ForcetekiPPOOracle
 from open_spiel.python.examples.forceteki_psro_oracles import ForcetekiTraceRLOracle
 from open_spiel.python.examples.forceteki_psro_ppo import ForcetekiPPOPolicy
@@ -147,6 +148,12 @@ def print_solver_summary(solver, iteration, elapsed_seconds, flags_obj):
 
 def run_psro(env, oracle, agents, flags_obj, game_params,
              restored_policies=None, restored_solver_state=None):
+  progress_reporter = forceteki_psro_progress.TextProgressReporter(
+      enabled=getattr(flags_obj, "progress", True),
+      interval_seconds=getattr(flags_obj, "progress_interval_seconds", 30.0))
+  if hasattr(oracle, "set_progress_reporter"):
+    oracle.set_progress_reporter(progress_reporter)
+
   solver = DiagnosticPSROSolver(
       env.game,
       oracle,
@@ -162,7 +169,8 @@ def run_psro(env, oracle, agents, flags_obj, game_params,
       symmetric_game=flags_obj.symmetric_game,
       rollout_diagnostics=flags_obj.rollout_diagnostics or flags_obj.debug,
       parallel_eval_workers=flags_obj.parallel_eval_workers,
-      seed=flags_obj.seed)
+      seed=flags_obj.seed,
+      progress_reporter=progress_reporter)
 
   start_time = time.time()
   start_iteration = 0
@@ -179,7 +187,14 @@ def run_psro(env, oracle, agents, flags_obj, game_params,
         flags_obj.output_dir, solver, flags_obj, game_params, start_iteration)
 
   for iteration in range(start_iteration + 1, flags_obj.gpsro_iterations + 1):
+    if hasattr(oracle, "set_progress_context"):
+      oracle.set_progress_context(iteration, flags_obj.gpsro_iterations)
+    solver.set_progress_context(iteration, flags_obj.gpsro_iterations)
+    progress_reporter.start(
+        "psro", iteration=f"{iteration}/{flags_obj.gpsro_iterations}")
     solver.iteration()
+    progress_reporter.done(
+        "psro", iteration=f"{iteration}/{flags_obj.gpsro_iterations}")
     print_solver_summary(solver, iteration, time.time() - start_time, flags_obj)
     if flags_obj.output_dir:
       forceteki_psro_artifacts.save_run_artifacts(

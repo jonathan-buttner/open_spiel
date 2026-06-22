@@ -210,6 +210,9 @@ class RLOracle(optimization_oracle.AbstractOracle):
   def _rollout(self, game, agents, **oracle_specific_execution_kwargs):
     self.sample_episode(None, agents, is_evaluation=False)
 
+  def _training_progress(self, episodes_per_oracle):
+    del episodes_per_oracle
+
   def generate_new_policies(self, training_parameters):
     """Generates new policies to be trained into best responses.
 
@@ -282,6 +285,7 @@ class RLOracle(optimization_oracle.AbstractOracle):
       self._rollout(game, agents, **oracle_specific_execution_kwargs)
       episodes_per_oracle = update_episodes_per_oracles(episodes_per_oracle,
                                                         indexes)
+      self._training_progress(episodes_per_oracle)
     # Freeze the new policies to keep their weights static. This allows us to
     # later not have to make the distinction between static and training
     # policies in training iterations.
