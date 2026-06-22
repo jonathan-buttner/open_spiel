@@ -43,7 +43,7 @@ class FakeProgressReporter:
 
 class ForcetekiPsroProgressTest(absltest.TestCase):
 
-  def test_start_update_and_done_lines_include_elapsed(self):
+  def test_start_update_and_done_lines_include_elapsed_and_eta(self):
     clock = FakeClock()
     output = io.StringIO()
     reporter = forceteki_psro_progress.TextProgressReporter(
@@ -57,11 +57,19 @@ class ForcetekiPsroProgressTest(absltest.TestCase):
     self.assertEqual(
         output.getvalue().splitlines(),
         [
-            "[progress] psro iteration=1/2 started elapsed=00:00:00",
+            ("[progress] psro iteration=1/2 started elapsed=0d 00:00:00 "
+             "eta=pending"),
             ("[progress] training iteration=1/2 episodes=3/10 30.0% "
-             "elapsed=00:01:05"),
-            "[progress] psro iteration=1/2 done elapsed=00:01:05",
+             "elapsed=0d 00:01:05 eta=0d 00:02:31"),
+            ("[progress] psro iteration=1/2 done elapsed=0d 00:01:05 "
+             "eta=0d 00:00:00"),
         ])
+
+  def test_duration_format_includes_days(self):
+    self.assertEqual(
+        forceteki_psro_progress.format_duration(65), "0d 00:01:05")
+    self.assertEqual(
+        forceteki_psro_progress.format_duration(90061), "1d 01:01:01")
 
   def test_update_throttles_and_force_bypasses_throttle(self):
     clock = FakeClock()
@@ -93,6 +101,24 @@ class ForcetekiPsroProgressTest(absltest.TestCase):
         output=output, time_fn=clock)
     reporter.update("evaluation", "rollouts", 1, 0)
     self.assertIn("rollouts=1/0 n/a", output.getvalue())
+    self.assertIn("eta=pending", output.getvalue())
+
+  def test_done_line_can_include_run_eta(self):
+    clock = FakeClock()
+    output = io.StringIO()
+    reporter = forceteki_psro_progress.TextProgressReporter(
+        output=output, time_fn=clock)
+
+    clock.advance(2 * 24 * 3600)
+    reporter.done(
+        "psro",
+        iteration="2/10",
+        run_eta=forceteki_psro_progress.format_duration(8 * 24 * 3600))
+
+    self.assertEqual(
+        output.getvalue().strip(),
+        ("[progress] psro iteration=2/10 done elapsed=2d 00:00:00 "
+         "eta=0d 00:00:00 run_eta=8d 00:00:00"))
 
   def test_training_progress_uses_episode_credits(self):
     reporter = FakeProgressReporter()

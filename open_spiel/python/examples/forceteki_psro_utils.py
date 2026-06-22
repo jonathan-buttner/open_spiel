@@ -7,6 +7,7 @@
 import hashlib
 import os
 import signal
+import sys
 from datetime import datetime
 from datetime import timezone
 
@@ -57,14 +58,43 @@ def _close_state(state):
     close()
 
 
-def _install_cleanup_signal_handlers():
-  def _handle_signal(signum, _frame):
+class _GracefulInterruptController:
+  """Tracks cooperative shutdown requests from Ctrl+C."""
+
+  def __init__(self, wait_for_storage=False, output=None):
+    self._wait_for_storage = bool(wait_for_storage)
+    self._output = output or sys.stdout
+    self._sigint_count = 0
+    self._shutdown_requested = False
+
+  @property
+  def shutdown_requested(self):
+    return self._shutdown_requested
+
+  def handle_signal(self, signum, _frame):
     if signum == signal.SIGINT:
+      self._sigint_count += 1
+      if self._sigint_count == 1 and self._wait_for_storage:
+        self._shutdown_requested = True
+        print(
+            "Ctrl+C received; Forceteki PSRO will stop after the next "
+            "artifact save. Press Ctrl+C again to stop immediately.",
+            file=self._output,
+            flush=True)
+        return
       raise KeyboardInterrupt
     raise SystemExit(128 + signum)
 
-  signal.signal(signal.SIGINT, _handle_signal)
-  signal.signal(signal.SIGTERM, _handle_signal)
+  def install(self):
+    signal.signal(signal.SIGINT, self.handle_signal)
+    signal.signal(signal.SIGTERM, self.handle_signal)
+    return self
+
+
+def _install_cleanup_signal_handlers(wait_for_storage=False, output=None):
+  return _GracefulInterruptController(
+      wait_for_storage=wait_for_storage,
+      output=output).install()
 
 
 def _debug_trace_path(debug_dir):

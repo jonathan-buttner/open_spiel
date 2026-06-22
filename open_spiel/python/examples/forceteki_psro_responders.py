@@ -146,8 +146,13 @@ def print_solver_summary(solver, iteration, elapsed_seconds, flags_obj):
   print("-" * 80)
 
 
+def _shutdown_requested(interrupt_controller):
+  return bool(getattr(interrupt_controller, "shutdown_requested", False))
+
+
 def run_psro(env, oracle, agents, flags_obj, game_params,
-             restored_policies=None, restored_solver_state=None):
+             restored_policies=None, restored_solver_state=None,
+             interrupt_controller=None):
   progress_reporter = forceteki_psro_progress.TextProgressReporter(
       enabled=getattr(flags_obj, "progress", True),
       interval_seconds=getattr(flags_obj, "progress_interval_seconds", 30.0))
@@ -185,6 +190,8 @@ def run_psro(env, oracle, agents, flags_obj, game_params,
   if flags_obj.output_dir:
     forceteki_psro_artifacts.save_run_artifacts(
         flags_obj.output_dir, solver, flags_obj, game_params, start_iteration)
+    if _shutdown_requested(interrupt_controller):
+      return solver
 
   for iteration in range(start_iteration + 1, flags_obj.gpsro_iterations + 1):
     if hasattr(oracle, "set_progress_context"):
@@ -193,10 +200,22 @@ def run_psro(env, oracle, agents, flags_obj, game_params,
     progress_reporter.start(
         "psro", iteration=f"{iteration}/{flags_obj.gpsro_iterations}")
     solver.iteration()
+    iteration_end_time = time.time()
+    completed_iterations = iteration - start_iteration
+    remaining_iterations = flags_obj.gpsro_iterations - iteration
+    done_fields = {"iteration": f"{iteration}/{flags_obj.gpsro_iterations}"}
+    if completed_iterations > 0:
+      average_iteration_seconds = (
+          (iteration_end_time - start_time) / completed_iterations)
+      done_fields["run_eta"] = forceteki_psro_progress.format_duration(
+          average_iteration_seconds * remaining_iterations)
     progress_reporter.done(
-        "psro", iteration=f"{iteration}/{flags_obj.gpsro_iterations}")
-    print_solver_summary(solver, iteration, time.time() - start_time, flags_obj)
+        "psro", **done_fields)
+    print_solver_summary(
+        solver, iteration, iteration_end_time - start_time, flags_obj)
     if flags_obj.output_dir:
       forceteki_psro_artifacts.save_run_artifacts(
           flags_obj.output_dir, solver, flags_obj, game_params, iteration)
+      if _shutdown_requested(interrupt_controller):
+        return solver
   return solver

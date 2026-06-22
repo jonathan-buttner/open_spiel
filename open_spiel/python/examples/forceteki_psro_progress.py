@@ -8,11 +8,12 @@ import sys
 import time
 
 
-def _format_elapsed(seconds):
+def format_duration(seconds):
   seconds = max(0, int(seconds))
-  hours, remainder = divmod(seconds, 3600)
+  days, remainder = divmod(seconds, 24 * 3600)
+  hours, remainder = divmod(remainder, 3600)
   minutes, seconds = divmod(remainder, 60)
-  return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+  return f"{days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 class TextProgressReporter:
@@ -26,12 +27,14 @@ class TextProgressReporter:
     self._time_fn = time_fn or time.time
     self._start_time = self._time_fn()
     self._last_update_time = {}
+    self._phase_start_times = {}
 
   @property
   def enabled(self):
     return self._enabled
 
   def start(self, phase, **fields):
+    self._phase_start_times[phase] = self._time_fn()
     self._emit(phase, fields, "started")
 
   def done(self, phase, **fields):
@@ -60,20 +63,43 @@ class TextProgressReporter:
     parts.append(f"{unit}={current}/{total}")
     parts.append(percent)
     parts.append(f"elapsed={self._elapsed()}")
+    parts.append(f"eta={self._eta(phase, current, total, now)}")
     print(" ".join(parts), file=self._output, flush=True)
     return True
 
   def _emit(self, phase, fields, status):
     if not self._enabled:
       return
+    fields = dict(fields)
+    run_eta = fields.pop("run_eta", None)
     parts = [f"[progress] {phase}"]
     parts.extend(_format_fields(fields))
     parts.append(status)
     parts.append(f"elapsed={self._elapsed()}")
+    if status == "done":
+      parts.append(f"eta={format_duration(0)}")
+    else:
+      parts.append("eta=pending")
+    if run_eta is not None:
+      parts.append(f"run_eta={run_eta}")
     print(" ".join(parts), file=self._output, flush=True)
 
   def _elapsed(self):
-    return _format_elapsed(self._time_fn() - self._start_time)
+    return format_duration(self._time_fn() - self._start_time)
+
+  def _eta(self, phase, current, total, now):
+    if total <= 0:
+      return "pending"
+    if current >= total:
+      return format_duration(0)
+    if current <= 0:
+      return "pending"
+    phase_start_time = self._phase_start_times.get(phase, self._start_time)
+    elapsed = now - phase_start_time
+    if elapsed <= 0:
+      return "pending"
+    remaining = max(0, total - current)
+    return format_duration(elapsed * remaining / current)
 
 
 def _format_fields(fields):

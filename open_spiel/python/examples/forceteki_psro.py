@@ -243,7 +243,8 @@ def main(argv):
     print(f"Forceteki debug trace: {trace_path}")
 
   env = None
-  _install_cleanup_signal_handlers()
+  interrupt_controller = _install_cleanup_signal_handlers(
+      wait_for_storage=bool(FLAGS.output_dir))
   try:
     game_params = _game_params_from_flags(FLAGS)
     game = pyspiel.load_game_as_turn_based(
@@ -269,7 +270,8 @@ def main(argv):
         FLAGS,
         game_params,
         restored_policies=restored_policies,
-        restored_solver_state=restored_solver_state)
+        restored_solver_state=restored_solver_state,
+        interrupt_controller=interrupt_controller)
   finally:
     if env is not None:
       _close_state(getattr(env, "_state", None))
