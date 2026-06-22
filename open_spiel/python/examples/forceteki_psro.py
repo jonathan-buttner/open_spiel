@@ -22,6 +22,7 @@ import numpy as np
 import pyspiel
 
 from open_spiel.python import rl_environment
+from open_spiel.python.examples import forceteki_psro_artifacts
 from open_spiel.python.examples.forceteki_psro_oracles import ForcetekiPPOOracle
 from open_spiel.python.examples.forceteki_psro_oracles import ForcetekiTraceRLOracle
 from open_spiel.python.examples.forceteki_psro_ppo import ForcetekiActionFactorizer
@@ -132,6 +133,68 @@ flags.DEFINE_bool("debug", False,
                   "Write Forceteki decision trace entries to trace.ndjson.")
 flags.DEFINE_string("debug_dir", "forceteki_psro_debug",
                     "Directory used for timestamped --debug trace runs.")
+flags.DEFINE_string("output_dir", "",
+                    "Directory where reloadable PSRO artifacts are written.")
+flags.DEFINE_string("resume_from", "",
+                    "Existing artifact directory to resume from.")
+flags.DEFINE_string("init_policy_from", "",
+                    "Policy checkpoint or artifact directory used to seed a "
+                    "new run without restoring full PSRO state.")
+flags.DEFINE_string("decks_path", "",
+                    "JSON file containing two Forceteki decklists.")
+flags.DEFINE_string("player0_deck_path", "",
+                    "JSON file containing player 0's Forceteki decklist.")
+flags.DEFINE_string("player1_deck_path", "",
+                    "JSON file containing player 1's Forceteki decklist.")
+flags.DEFINE_string("deck_pool_path", "",
+                    "Directory of SWUDB-format Forceteki deck JSON files. "
+                    "Overrides FORCETEKI_DECK_POOL_PATH when set.")
+
+
+def _game_params_from_flags(flags_obj):
+  params = {
+      "players": flags_obj.n_players,
+      "max_game_length": flags_obj.max_episode_steps,
+      "worker_pool_size": flags_obj.forceteki_worker_pool_size,
+  }
+  if flags_obj.forceteki_seed:
+    params["seed"] = flags_obj.forceteki_seed
+  deck_pool_path = (
+      flags_obj.deck_pool_path or os.environ.get("FORCETEKI_DECK_POOL_PATH"))
+  if deck_pool_path:
+    params["deck_pool_path"] = deck_pool_path
+  if flags_obj.decks_path:
+    params["decks_path"] = flags_obj.decks_path
+  if flags_obj.player0_deck_path:
+    params["player0_deck_path"] = flags_obj.player0_deck_path
+  if flags_obj.player1_deck_path:
+    params["player1_deck_path"] = flags_obj.player1_deck_path
+  return params
+
+
+def _seed_agents_from_policy(flags_obj, env, agents):
+  if not flags_obj.init_policy_from:
+    return agents
+  init_path = flags_obj.init_policy_from
+  if os.path.isdir(init_path):
+    population = forceteki_psro_artifacts.load_policy_population(
+        init_path, env, device=flags_obj.ppo_device)
+    solver_state = forceteki_psro_artifacts.load_solver_state(init_path)
+    bot_policy = forceteki_psro_artifacts.bot_policy_dict(solver_state)
+    seeded_agents = list(agents)
+    for player_entry in bot_policy["players"]:
+      player_id = int(player_entry["player_id"])
+      policy_index = int(player_entry["policy_index"])
+      seeded_agents[player_id] = population[player_id][policy_index]
+      seeded_agents[player_id].freeze()
+    return seeded_agents
+
+  policy_obj = forceteki_psro_artifacts.load_single_policy(
+      init_path, env, device=flags_obj.ppo_device)
+  seeded_agents = list(agents)
+  seeded_agents[policy_obj.player_id] = policy_obj
+  policy_obj.freeze()
+  return seeded_agents
 
 
 def main(argv):
@@ -148,6 +211,24 @@ def main(argv):
     raise app.UsageError(
         "--parallel_eval_workers > 1 requires "
         "--forceteki_worker_pool_size >= --parallel_eval_workers")
+  if FLAGS.resume_from and FLAGS.init_policy_from:
+    raise app.UsageError("--resume_from and --init_policy_from are exclusive")
+  if ((FLAGS.output_dir or FLAGS.resume_from or FLAGS.init_policy_from) and
+      FLAGS.oracle_type.upper() != "PPO"):
+    raise app.UsageError(
+        "Reloadable Forceteki artifacts currently support --oracle_type=PPO")
+  if bool(FLAGS.player0_deck_path) != bool(FLAGS.player1_deck_path):
+    raise app.UsageError(
+        "--player0_deck_path and --player1_deck_path must be provided together")
+  if FLAGS.decks_path and (FLAGS.player0_deck_path or FLAGS.player1_deck_path):
+    raise app.UsageError(
+        "Use either --decks_path or per-player deck paths, not both")
+  resolved_deck_pool_path = (
+      FLAGS.deck_pool_path or os.environ.get("FORCETEKI_DECK_POOL_PATH"))
+  if resolved_deck_pool_path and (FLAGS.decks_path or FLAGS.player0_deck_path):
+    raise app.UsageError(
+        "Use either deck_pool_path/FORCETEKI_DECK_POOL_PATH or fixed deck "
+        "paths, not both")
 
   np.random.seed(FLAGS.seed)
   if FLAGS.forceteki_seed:
@@ -160,16 +241,31 @@ def main(argv):
   env = None
   _install_cleanup_signal_handlers()
   try:
+    game_params = _game_params_from_flags(FLAGS)
     game = pyspiel.load_game_as_turn_based(
-        FLAGS.game_name,
-        {
-            "players": FLAGS.n_players,
-            "max_game_length": FLAGS.max_episode_steps,
-            "worker_pool_size": FLAGS.forceteki_worker_pool_size,
-        })
+        FLAGS.game_name, game_params)
     env = rl_environment.Environment(game)
     oracle, agents = init_oracle(env, FLAGS)
-    run_psro(env, oracle, agents, FLAGS)
+    restored_policies = None
+    restored_solver_state = None
+    if FLAGS.resume_from:
+      restored_policies = forceteki_psro_artifacts.load_policy_population(
+          FLAGS.resume_from, env, device=FLAGS.ppo_device)
+      restored_solver_state = forceteki_psro_artifacts.load_solver_state(
+          FLAGS.resume_from)
+      forceteki_psro_artifacts.restore_rng_state(FLAGS.resume_from)
+      agents = [player_policies[0] for player_policies in restored_policies]
+    else:
+      agents = _seed_agents_from_policy(FLAGS, env, agents)
+
+    run_psro(
+        env,
+        oracle,
+        agents,
+        FLAGS,
+        game_params,
+        restored_policies=restored_policies,
+        restored_solver_state=restored_solver_state)
   finally:
     if env is not None:
       _close_state(getattr(env, "_state", None))

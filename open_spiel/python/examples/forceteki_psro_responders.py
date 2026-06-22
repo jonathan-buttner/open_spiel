@@ -9,6 +9,7 @@ import time
 from absl import app
 
 from open_spiel.python.algorithms.psro_v2 import rl_policy
+from open_spiel.python.examples import forceteki_psro_artifacts
 from open_spiel.python.examples.forceteki_psro_oracles import ForcetekiPPOOracle
 from open_spiel.python.examples.forceteki_psro_oracles import ForcetekiTraceRLOracle
 from open_spiel.python.examples.forceteki_psro_ppo import ForcetekiPPOPolicy
@@ -144,7 +145,8 @@ def print_solver_summary(solver, iteration, elapsed_seconds, flags_obj):
   print("-" * 80)
 
 
-def run_psro(env, oracle, agents, flags_obj):
+def run_psro(env, oracle, agents, flags_obj, game_params,
+             restored_policies=None, restored_solver_state=None):
   solver = DiagnosticPSROSolver(
       env.game,
       oracle,
@@ -163,7 +165,23 @@ def run_psro(env, oracle, agents, flags_obj):
       seed=flags_obj.seed)
 
   start_time = time.time()
-  print_solver_summary(solver, 0, time.time() - start_time, flags_obj)
-  for iteration in range(1, flags_obj.gpsro_iterations + 1):
+  start_iteration = 0
+  if restored_solver_state is not None:
+    forceteki_psro_artifacts.restore_solver_state(
+        solver, restored_policies, restored_solver_state)
+    start_iteration = int(restored_solver_state.get(
+        "completed_iterations", restored_solver_state.get("iterations", 0)))
+
+  print_solver_summary(
+      solver, start_iteration, time.time() - start_time, flags_obj)
+  if flags_obj.output_dir:
+    forceteki_psro_artifacts.save_run_artifacts(
+        flags_obj.output_dir, solver, flags_obj, game_params, start_iteration)
+
+  for iteration in range(start_iteration + 1, flags_obj.gpsro_iterations + 1):
     solver.iteration()
     print_solver_summary(solver, iteration, time.time() - start_time, flags_obj)
+    if flags_obj.output_dir:
+      forceteki_psro_artifacts.save_run_artifacts(
+          flags_obj.output_dir, solver, flags_obj, game_params, iteration)
+  return solver

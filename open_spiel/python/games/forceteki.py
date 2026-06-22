@@ -11,8 +11,10 @@
 import atexit
 import contextlib
 import contextvars
+import hashlib
 import json
 import os
+import random
 import subprocess
 import threading
 from typing import Any
@@ -33,6 +35,7 @@ _TRACE_PATH_ENV = "FORCETEKI_TRACE_PATH"
 _TRACE_CONTEXT = contextvars.ContextVar("forceteki_trace_context", default={})
 _TRACE_LOCK = threading.Lock()
 _TRACE_GLOBAL_ACTION_COUNT = 0
+_DECK_POOL_PATH_ENV = "FORCETEKI_DECK_POOL_PATH"
 
 _GAME_TYPE = pyspiel.GameType(
     short_name="python_forceteki_swu",
@@ -52,6 +55,13 @@ _GAME_TYPE = pyspiel.GameType(
         "players": _NUM_PLAYERS,
         "max_game_length": _DEFAULT_MAX_GAME_LENGTH,
         "worker_pool_size": 0,
+        "seed": "",
+        "deck_pool_path": "",
+        "decks_path": "",
+        "player0_deck_path": "",
+        "player1_deck_path": "",
+        "card_data_path": "",
+        "preselected_first_player_id": "",
     })
 
 _GAME_INFO = pyspiel.GameInfo(
@@ -84,6 +94,7 @@ class ForcetekiGame(pyspiel.Game):
     self._params = params or {}
     if int(self._params.get("players", _NUM_PLAYERS)) != _NUM_PLAYERS:
       raise ValueError("Forceteki SWU only supports 2 players")
+    self._deck_pool_sampler = _deck_pool_sampler(self._params)
 
   def new_initial_state(self):
     return ForcetekiState(self, self._params)
@@ -107,7 +118,11 @@ class ForcetekiState(pyspiel.State):
         else _NodeWorker(params))
     try:
       if checkpoint is None:
-        self._state = self._request_worker("reset", _reset_params(params))
+        self._state = self._request_worker(
+            "reset",
+            _reset_params(
+                params,
+                deck_pool_sampler=getattr(game, "_deck_pool_sampler", None)))
       else:
         self._state = self._request_worker("restore_checkpoint",
                                            {"checkpoint": checkpoint})
@@ -708,10 +723,107 @@ def _worker_path(params):
                           "build/server/game/simulation/SimulationWorker.js"))
 
 
-def _reset_params(params):
+class _DeckPoolSampler:
+  """Deterministic shuffle-bag sampler for pairs of Forceteki decklists."""
+
+  def __init__(self, deck_pool_path, seed):
+    self._deck_pool_path = os.path.abspath(str(deck_pool_path))
+    self._seed = str(seed)
+    self._lock = threading.Lock()
+    self._epoch = 0
+    self._position = 0
+    self._decks = self._load_decks(self._deck_pool_path)
+    self._bag = []
+    self._reshuffle_locked()
+
+  def sample_pair(self):
+    with self._lock:
+      first_index = self._draw_one_locked()
+      second_index = self._draw_one_locked(exclude=first_index)
+      return [
+          self._copy_deck(self._decks[first_index]),
+          self._copy_deck(self._decks[second_index]),
+      ]
+
+  def _draw_one_locked(self, exclude=None):
+    self._ensure_bag_locked()
+    if exclude is not None and len(self._decks) > 1:
+      for offset in range(self._position, len(self._bag)):
+        if self._bag[offset] != exclude:
+          self._bag[self._position], self._bag[offset] = (
+              self._bag[offset], self._bag[self._position])
+          break
+    deck_index = self._bag[self._position]
+    self._position += 1
+    return deck_index
+
+  def _ensure_bag_locked(self):
+    if self._position >= len(self._bag):
+      self._epoch += 1
+      self._reshuffle_locked()
+
+  def _reshuffle_locked(self):
+    self._bag = list(range(len(self._decks)))
+    rng = random.Random(_stable_int_seed(self._seed, self._epoch))
+    rng.shuffle(self._bag)
+    self._position = 0
+
+  def _load_decks(self, deck_pool_path):
+    if not os.path.isdir(deck_pool_path):
+      raise ValueError(
+          f"Forceteki deck_pool_path must be a directory: {deck_pool_path}")
+    deck_paths = [
+        os.path.join(deck_pool_path, name)
+        for name in sorted(os.listdir(deck_pool_path))
+        if name.endswith(".json")
+    ]
+    if not deck_paths:
+      raise ValueError(
+          f"Forceteki deck_pool_path contains no .json files: {deck_pool_path}")
+
+    decks = []
+    for deck_path in deck_paths:
+      try:
+        with open(deck_path, encoding="utf-8") as deck_file:
+          deck = json.load(deck_file)
+      except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid Forceteki deck JSON in {deck_path}: {exc}") from exc
+      if not isinstance(deck, dict):
+        raise ValueError(
+            f"Forceteki deck JSON must contain one decklist object: {deck_path}")
+      decks.append(deck)
+    return decks
+
+  def _copy_deck(self, deck):
+    return json.loads(json.dumps(deck))
+
+
+def _stable_int_seed(seed, epoch):
+  digest = hashlib.sha256(
+      repr((str(seed), int(epoch))).encode("utf-8")).hexdigest()
+  return int(digest[:16], 16)
+
+
+def _deck_pool_path(params):
+  return params.get("deck_pool_path") or os.environ.get(_DECK_POOL_PATH_ENV)
+
+
+def _deck_pool_sampler(params):
+  deck_pool_path = _deck_pool_path(params)
+  if not deck_pool_path:
+    return None
+  return _DeckPoolSampler(deck_pool_path, _reset_seed(params))
+
+
+def _reset_seed(params):
+  return str(params.get("seed") or os.environ.get("FORCETEKI_SEED") or
+             "open-spiel")
+
+
+def _reset_params(params, deck_pool_sampler=None):
   reset = {
-      "seed": str(params.get("seed") or os.environ.get("FORCETEKI_SEED") or
-                  "open-spiel"),
+      "seed": _reset_seed(params),
   }
   card_data_path = params.get("card_data_path") or os.environ.get(
       "FORCETEKI_CARD_DATA_PATH")
@@ -721,7 +833,43 @@ def _reset_params(params):
       "FORCETEKI_FIRST_PLAYER_ID")
   if first_player_id:
     reset["preselectedFirstPlayerId"] = str(first_player_id)
+  decks = _decklists(params, deck_pool_sampler)
+  if decks is not None:
+    reset["decks"] = decks
   return reset
+
+
+def _decklists(params, deck_pool_sampler=None):
+  has_deck_pool = bool(_deck_pool_path(params) or deck_pool_sampler is not None)
+  decks_path = params.get("decks_path") or os.environ.get("FORCETEKI_DECKS_PATH")
+  player0_deck_path = params.get("player0_deck_path") or os.environ.get(
+      "FORCETEKI_PLAYER0_DECK_PATH")
+  player1_deck_path = params.get("player1_deck_path") or os.environ.get(
+      "FORCETEKI_PLAYER1_DECK_PATH")
+  if has_deck_pool and (decks_path or player0_deck_path or player1_deck_path):
+    raise ValueError(
+        "Use deck_pool_path or fixed deck paths, not both")
+  if deck_pool_sampler is not None:
+    return deck_pool_sampler.sample_pair()
+
+  if decks_path:
+    with open(str(decks_path), encoding="utf-8") as decks_file:
+      decks = json.load(decks_file)
+    if not isinstance(decks, list) or len(decks) != _NUM_PLAYERS:
+      raise ValueError("Forceteki decks_path must contain two decklists")
+    return decks
+
+  if player0_deck_path or player1_deck_path:
+    if not player0_deck_path or not player1_deck_path:
+      raise ValueError(
+          "Both player0_deck_path and player1_deck_path are required")
+    with open(str(player0_deck_path), encoding="utf-8") as player0_file:
+      player0_deck = json.load(player0_file)
+    with open(str(player1_deck_path), encoding="utf-8") as player1_file:
+      player1_deck = json.load(player1_file)
+    return [player0_deck, player1_deck]
+
+  return None
 
 
 atexit.register(close_all_workers)

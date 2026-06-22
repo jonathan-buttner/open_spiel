@@ -192,6 +192,44 @@ class ForcetekiPPOPolicy(policy.Policy):
         for key, value in self._network.state_dict().items()
     }
 
+  def checkpoint(self, player_id=None, policy_index=None):
+    """Returns a reloadable Torch checkpoint payload for this policy."""
+    return {
+        "format": "forceteki_ppo_policy_v1",
+        "player_id": self._player_id,
+        "policy_player_id": self._player_id,
+        "policy_index": policy_index,
+        "population_player_id": player_id,
+        "kwargs": dict(self._kwargs),
+        "frozen": self._frozen,
+        "network_state_dict": self.get_weights(),
+        "optimizer_state_dict": self._optimizer.state_dict(),
+    }
+
+  def load_checkpoint(self, checkpoint, load_optimizer=True):
+    """Loads network and optimizer state from a checkpoint payload."""
+    self._network.load_state_dict(checkpoint["network_state_dict"])
+    if load_optimizer and checkpoint.get("optimizer_state_dict") is not None:
+      self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    if checkpoint.get("frozen", True):
+      self.freeze()
+    else:
+      self.unfreeze()
+
+  @classmethod
+  def from_checkpoint(cls, env, checkpoint, player_id=None, device=None,
+                      load_optimizer=True):
+    """Builds a policy from a checkpoint payload."""
+    kwargs = dict(checkpoint["kwargs"])
+    if device is not None:
+      kwargs["device"] = device
+    restored_player_id = (
+        checkpoint.get("policy_player_id", checkpoint.get("player_id", 0))
+        if player_id is None else player_id)
+    policy_obj = cls(env, restored_player_id, **kwargs)
+    policy_obj.load_checkpoint(checkpoint, load_optimizer=load_optimizer)
+    return policy_obj
+
   def copy_with_noise(self, sigma=0.0):
     copied = ForcetekiPPOPolicy(self._env, self._player_id, **self._kwargs)
     state_dict = self.get_weights()

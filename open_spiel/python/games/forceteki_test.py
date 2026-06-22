@@ -127,12 +127,13 @@ class FakeNodeWorker:
     self._process = object()
     self.reset_count = 0
     self.closed = False
+    self.requests = []
     with FakeNodeWorker._lock:
       self.worker_id = len(FakeNodeWorker.instances)
       FakeNodeWorker.instances.append(self)
 
   def request(self, op, params=None):
-    del params
+    self.requests.append((op, copy.deepcopy(params)))
     if self.closed:
       raise RuntimeError("worker is closed")
     if op in ("reset", "restore_checkpoint"):
@@ -166,6 +167,25 @@ def _without_prompt_uuids(value):
   return value
 
 
+def _sample_deck(deck_id):
+  return {
+      "metadata": {"name": deck_id, "author": "test"},
+      "deckID": deck_id,
+      "leader": {"id": "SOR_010", "count": 1},
+      "base": {"id": "SOR_027", "count": 1},
+      "deck": [{"id": "SOR_044", "count": 50}],
+      "sideboard": [],
+  }
+
+
+def _write_deck(deck_dir, file_name, deck_id):
+  path = os.path.join(deck_dir, file_name)
+  deck = _sample_deck(deck_id)
+  with open(path, "w", encoding="utf-8") as deck_file:
+    json.dump(deck, deck_file)
+  return path, deck
+
+
 class ForcetekiTest(absltest.TestCase):
 
   def setUp(self):
@@ -173,6 +193,15 @@ class ForcetekiTest(absltest.TestCase):
     self._original_trace_path = os.environ.pop("FORCETEKI_TRACE_PATH", None)
     self._original_pool_size = os.environ.pop(
         "FORCETEKI_WORKER_POOL_SIZE", None)
+    self._original_deck_env = {
+        name: os.environ.pop(name, None)
+        for name in (
+            "FORCETEKI_DECK_POOL_PATH",
+            "FORCETEKI_DECKS_PATH",
+            "FORCETEKI_PLAYER0_DECK_PATH",
+            "FORCETEKI_PLAYER1_DECK_PATH",
+        )
+    }
     forceteki._TRACE_GLOBAL_ACTION_COUNT = 0
 
   def tearDown(self):
@@ -185,6 +214,11 @@ class ForcetekiTest(absltest.TestCase):
       os.environ["FORCETEKI_WORKER_POOL_SIZE"] = self._original_pool_size
     else:
       os.environ.pop("FORCETEKI_WORKER_POOL_SIZE", None)
+    for name, value in self._original_deck_env.items():
+      if value is not None:
+        os.environ[name] = value
+      else:
+        os.environ.pop(name, None)
     super().tearDown()
 
   def close_forceteki_states(self, *states):
@@ -245,6 +279,135 @@ class ForcetekiTest(absltest.TestCase):
     self.assertIn("legal_actions", timestep.observations)
     self.assertNotEmpty(timestep.observations["legal_actions"][0])
     self.close_forceteki_states(state, env._state)
+
+  def test_reset_passes_decklists_to_worker(self):
+    self.patch_node_worker()
+    temp_dir = tempfile.mkdtemp()
+    player0_path = os.path.join(temp_dir, "player0.json")
+    player1_path = os.path.join(temp_dir, "player1.json")
+    player0_deck = {
+        "deckID": "deck-0",
+        "leader": {"id": "SOR_010"},
+        "base": {"id": "SOR_027"},
+        "deck": [{"id": "SOR_044", "count": 3}],
+        "sideboard": [],
+    }
+    player1_deck = {
+        "deckID": "deck-1",
+        "leader": {"id": "SOR_005"},
+        "base": {"id": "SOR_029"},
+        "deck": [{"id": "SOR_045", "count": 3}],
+        "sideboard": [],
+    }
+    with open(player0_path, "w", encoding="utf-8") as player0_file:
+      json.dump(player0_deck, player0_file)
+    with open(player1_path, "w", encoding="utf-8") as player1_file:
+      json.dump(player1_deck, player1_file)
+
+    game = pyspiel.load_game("python_forceteki_swu", {
+        "player0_deck_path": player0_path,
+        "player1_deck_path": player1_path,
+    })
+    state = game.new_initial_state()
+
+    worker = FakeNodeWorker.instances[0]
+    self.assertEqual(worker.requests[0][0], "reset")
+    self.assertEqual(
+        worker.requests[0][1]["decks"], [player0_deck, player1_deck])
+    self.close_forceteki_states(state)
+
+  def test_reset_omits_decks_when_deck_paths_are_unset(self):
+    self.patch_node_worker()
+    game = pyspiel.load_game("python_forceteki_swu")
+    state = game.new_initial_state()
+
+    worker = FakeNodeWorker.instances[0]
+    self.assertEqual(worker.requests[0][0], "reset")
+    self.assertNotIn("decks", worker.requests[0][1])
+    self.close_forceteki_states(state)
+
+  def test_deck_pool_sampler_uses_all_decks_before_repeats(self):
+    temp_dir = tempfile.mkdtemp()
+    for index in range(5):
+      _write_deck(temp_dir, f"deck-{index}.json", f"deck-{index}")
+    with open(os.path.join(temp_dir, "ignored.txt"), "w",
+              encoding="utf-8") as ignored_file:
+      ignored_file.write("not a deck")
+    sampler = forceteki._DeckPoolSampler(temp_dir, "seed")
+
+    drawn = []
+    while len(drawn) < 5:
+      drawn.extend(deck["deckID"] for deck in sampler.sample_pair())
+
+    self.assertLen(set(drawn[:5]), 5)
+
+  def test_deck_pool_sampler_avoids_mirror_matches_when_possible(self):
+    temp_dir = tempfile.mkdtemp()
+    for index in range(3):
+      _write_deck(temp_dir, f"deck-{index}.json", f"deck-{index}")
+    sampler = forceteki._DeckPoolSampler(temp_dir, "seed")
+
+    for _ in range(10):
+      player0_deck, player1_deck = sampler.sample_pair()
+      self.assertNotEqual(player0_deck["deckID"], player1_deck["deckID"])
+
+  def test_deck_pool_sampler_is_reproducible_for_seed(self):
+    temp_dir = tempfile.mkdtemp()
+    for index in range(4):
+      _write_deck(temp_dir, f"deck-{index}.json", f"deck-{index}")
+    first_sampler = forceteki._DeckPoolSampler(temp_dir, "seed")
+    second_sampler = forceteki._DeckPoolSampler(temp_dir, "seed")
+
+    first_sequence = [
+        [deck["deckID"] for deck in first_sampler.sample_pair()]
+        for _ in range(5)
+    ]
+    second_sequence = [
+        [deck["deckID"] for deck in second_sampler.sample_pair()]
+        for _ in range(5)
+    ]
+
+    self.assertEqual(first_sequence, second_sequence)
+
+  def test_deck_pool_path_passes_sampled_decks_to_worker(self):
+    self.patch_node_worker()
+    temp_dir = tempfile.mkdtemp()
+    for index in range(3):
+      _write_deck(temp_dir, f"deck-{index}.json", f"deck-{index}")
+    game = pyspiel.load_game("python_forceteki_swu", {
+        "deck_pool_path": temp_dir,
+        "seed": "deck-seed",
+    })
+
+    states = [game.new_initial_state(), game.new_initial_state()]
+
+    first_reset = FakeNodeWorker.instances[0].requests[0][1]
+    second_reset = FakeNodeWorker.instances[1].requests[0][1]
+    self.assertIn("decks", first_reset)
+    self.assertIn("decks", second_reset)
+    self.assertNotEqual(
+        first_reset["decks"][0]["deckID"],
+        first_reset["decks"][1]["deckID"])
+    first_three_draws = [
+        first_reset["decks"][0]["deckID"],
+        first_reset["decks"][1]["deckID"],
+        second_reset["decks"][0]["deckID"],
+    ]
+    self.assertLen(set(first_three_draws), 3)
+    self.close_forceteki_states(*states)
+
+  def test_deck_pool_path_can_come_from_environment(self):
+    self.patch_node_worker()
+    temp_dir = tempfile.mkdtemp()
+    _write_deck(temp_dir, "deck-0.json", "deck-0")
+    os.environ["FORCETEKI_DECK_POOL_PATH"] = temp_dir
+    game = pyspiel.load_game("python_forceteki_swu")
+    state = game.new_initial_state()
+
+    worker = FakeNodeWorker.instances[0]
+    self.assertEqual(worker.requests[0][1]["decks"][0]["deckID"], "deck-0")
+    self.assertEqual(worker.requests[0][1]["decks"][1]["deckID"], "deck-0")
+    self.close_forceteki_states(state)
 
   def test_filters_selected_card_when_forward_action_exists(self):
     game = pyspiel.load_game("python_forceteki_swu")
