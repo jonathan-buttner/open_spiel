@@ -4,8 +4,44 @@
 
 """Line-based progress reporting for the Forceteki PSRO example."""
 
+import os
 import sys
 import time
+
+
+DEFAULT_LOG_DIR = "forceteki_psro_logs"
+DEFAULT_LOG_FILENAME = "forceteki_psro.log"
+
+
+class TeeOutput:
+  """File-like writer that duplicates text to multiple output streams."""
+
+  def __init__(self, *outputs):
+    self._outputs = outputs
+
+  def write(self, text):
+    for output in self._outputs:
+      output.write(text)
+    return len(text)
+
+  def flush(self):
+    for output in self._outputs:
+      output.flush()
+
+  def close(self):
+    for output in self._outputs:
+      close = getattr(output, "close", None)
+      if close is not None and output is not sys.stdout:
+        close()
+
+
+def resolve_log_path(flags_obj):
+  """Returns the Forceteki PSRO log path implied by logging flags."""
+  log_file = getattr(flags_obj, "log_file", "")
+  if log_file:
+    return log_file
+  log_dir = getattr(flags_obj, "log_dir", DEFAULT_LOG_DIR)
+  return os.path.join(log_dir, DEFAULT_LOG_FILENAME)
 
 
 def format_duration(seconds):

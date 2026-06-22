@@ -9,6 +9,7 @@ import contextlib
 import hashlib
 import itertools
 import random
+import sys
 import threading
 
 import numpy as np
@@ -71,11 +72,12 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
   """PSRO solver that can print ForceTeki rollout diagnostics per meta entry."""
 
   def __init__(self, *args, rollout_diagnostics=False, parallel_eval_workers=1,
-               seed=1, progress_reporter=None, **kwargs):
+               seed=1, progress_reporter=None, output=None, **kwargs):
     self._rollout_diagnostics = rollout_diagnostics
     self._parallel_eval_workers = max(1, int(parallel_eval_workers))
     self._seed = int(seed)
     self._progress_reporter = progress_reporter
+    self._output = output or sys.stdout
     self._progress_iteration = None
     self._progress_total_iterations = None
     self._evaluation_rollouts_done = 0
@@ -311,4 +313,6 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
         f"non_terminal={reason_counts.get('non_terminal', 0)} "
         f"unknown_terminal={reason_counts.get('unknown_terminal', 0)} "
         f"nonzero_returns={nonzero_returns} "
-        f"steps(avg/min/max)={step_summary}")
+        f"steps(avg/min/max)={step_summary}",
+        file=self._output,
+        flush=True)

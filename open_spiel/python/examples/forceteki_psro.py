@@ -133,6 +133,13 @@ flags.DEFINE_bool("progress", True,
                   "Print line-based progress updates during PSRO runs.")
 flags.DEFINE_float("progress_interval_seconds", 30.0,
                    "Minimum seconds between non-final progress updates.")
+flags.DEFINE_bool("log_to_file", True,
+                  "Also write Forceteki PSRO run output to a log file.")
+flags.DEFINE_string("log_dir", "forceteki_psro_logs",
+                    "Directory used for the default Forceteki PSRO log file.")
+flags.DEFINE_string("log_file", "",
+                    "Explicit Forceteki PSRO log file path. Overrides "
+                    "--log_dir when set.")
 flags.DEFINE_bool("debug", False,
                   "Write Forceteki decision trace entries to trace.ndjson.")
 flags.DEFINE_string("debug_dir", "forceteki_psro_debug",

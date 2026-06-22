@@ -3,6 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import io
+from types import SimpleNamespace
 
 from absl.testing import absltest
 import numpy as np
@@ -42,6 +43,31 @@ class FakeProgressReporter:
 
 
 class ForcetekiPsroProgressTest(absltest.TestCase):
+
+  def test_resolve_log_path_uses_default_and_override(self):
+    self.assertEqual(
+        forceteki_psro_progress.resolve_log_path(SimpleNamespace()),
+        "forceteki_psro_logs/forceteki_psro.log")
+    self.assertEqual(
+        forceteki_psro_progress.resolve_log_path(
+            SimpleNamespace(log_dir="custom_logs", log_file="")),
+        "custom_logs/forceteki_psro.log")
+    self.assertEqual(
+        forceteki_psro_progress.resolve_log_path(
+            SimpleNamespace(log_dir="custom_logs", log_file="/tmp/run.log")),
+        "/tmp/run.log")
+
+  def test_tee_output_writes_and_flushes_all_outputs(self):
+    first = io.StringIO()
+    second = io.StringIO()
+    output = forceteki_psro_progress.TeeOutput(first, second)
+
+    written = output.write("hello\n")
+    output.flush()
+
+    self.assertEqual(written, len("hello\n"))
+    self.assertEqual(first.getvalue(), "hello\n")
+    self.assertEqual(second.getvalue(), "hello\n")
 
   def test_start_update_and_done_lines_include_elapsed_and_eta(self):
     clock = FakeClock()

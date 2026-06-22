@@ -2,6 +2,8 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
+import os
+import tempfile
 from types import SimpleNamespace
 from unittest import mock
 
@@ -100,6 +102,32 @@ class ForcetekiPsroRespondersTest(absltest.TestCase):
         [call.args[4] for call in save_run_artifacts.call_args_list],
         [0, 1])
     self.assertEqual(solver.progress_contexts, [(1, 3)])
+
+  def test_run_psro_writes_log_file_when_enabled(self):
+    temp_dir = tempfile.mkdtemp()
+    log_path = os.path.join(temp_dir, "run.log")
+
+    with mock.patch.object(
+        forceteki_psro_responders,
+        "DiagnosticPSROSolver",
+        FakeSolver):
+      solver = forceteki_psro_responders.run_psro(
+          FakeEnv(),
+          oracle=object(),
+          agents=["a0", "a1"],
+          flags_obj=_flags(
+              gpsro_iterations=0,
+              log_to_file=True,
+              log_file=log_path,
+              output_dir=""),
+          game_params={"players": 2})
+
+    self.assertIs(solver, FakeSolver.instances[0])
+    with open(log_path, encoding="utf-8") as log_file:
+      contents = log_file.read()
+    self.assertIn(f"Forceteki PSRO log: {log_path}", contents)
+    self.assertIn("Iteration: 0", contents)
+    self.assertIn("Policies per player: [1, 1]", contents)
 
 
 if __name__ == "__main__":
