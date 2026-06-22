@@ -71,4 +71,5 @@ open_spiel/.vs
 *.swp
 
 forceteki_psro_debug
-forceteki_psro_logs/
+forceteki_psro_logs
+forceteki_runs

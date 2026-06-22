@@ -40,7 +40,7 @@ def resolve_log_path(flags_obj):
   log_file = getattr(flags_obj, "log_file", "")
   if log_file:
     return log_file
-  log_dir = getattr(flags_obj, "log_dir", DEFAULT_LOG_DIR)
+  log_dir = getattr(flags_obj, "forceteki_log_dir", DEFAULT_LOG_DIR)
   return os.path.join(log_dir, DEFAULT_LOG_FILENAME)
 
 

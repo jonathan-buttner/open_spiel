@@ -71,7 +71,7 @@ CONFIG_FLAG_NAMES = (
     "progress",
     "progress_interval_seconds",
     "log_to_file",
-    "log_dir",
+    "forceteki_log_dir",
     "log_file",
     "debug",
     "debug_dir",

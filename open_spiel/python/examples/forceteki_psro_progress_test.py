@@ -50,11 +50,12 @@ class ForcetekiPsroProgressTest(absltest.TestCase):
         "forceteki_psro_logs/forceteki_psro.log")
     self.assertEqual(
         forceteki_psro_progress.resolve_log_path(
-            SimpleNamespace(log_dir="custom_logs", log_file="")),
+            SimpleNamespace(forceteki_log_dir="custom_logs", log_file="")),
         "custom_logs/forceteki_psro.log")
     self.assertEqual(
         forceteki_psro_progress.resolve_log_path(
-            SimpleNamespace(log_dir="custom_logs", log_file="/tmp/run.log")),
+            SimpleNamespace(
+                forceteki_log_dir="custom_logs", log_file="/tmp/run.log")),
         "/tmp/run.log")
 
   def test_tee_output_writes_and_flushes_all_outputs(self):
