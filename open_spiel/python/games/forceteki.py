@@ -314,12 +314,14 @@ class ForcetekiState(pyspiel.State):
                    pre_worker_state):
     pre_state = pre_worker_state.get("state", {})
     post_state = self._state.get("state", {})
+    game_id = pre_state.get("gameId")
     player_id = (
         pre_worker_state.get("currentPlayerId") or
         _action_player_id(legal_action_map.get(action)) or
         _state_active_player_id(pre_state))
     return {
         "globalActionCount": global_action_count,
+        "gameId": game_id,
         "actionCount": self._move_number,
         "moveNumber": self._move_number,
         "rolloutContext": dict(_TRACE_CONTEXT.get()),

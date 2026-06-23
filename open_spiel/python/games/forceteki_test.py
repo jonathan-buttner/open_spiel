@@ -575,6 +575,7 @@ class ForcetekiTest(absltest.TestCase):
     self.assertLen(entries, 1)
     entry = entries[0]
     self.assertEqual(entry["rolloutContext"]["rolloutType"], "evaluation")
+    self.assertEqual(entry["gameId"], "fake-game")
     self.assertEqual(entry["decisionPlayerId"], "player-0")
     self.assertEqual(entry["phase"], "action")
     self.assertEqual(entry["turnNumber"], 2)

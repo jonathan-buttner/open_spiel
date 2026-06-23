@@ -163,9 +163,10 @@ def _open_output(flags_obj):
   if log_dir:
     os.makedirs(log_dir, exist_ok=True)
   log_file = open(log_path, "a", encoding="utf-8")
-  output = forceteki_psro_progress.TeeOutput(sys.stdout, log_file)
+  log_output = forceteki_psro_progress.TimestampedLineOutput(log_file)
+  output = forceteki_psro_progress.TeeOutput(sys.stdout, log_output)
   print(f"Forceteki PSRO log: {log_path}", file=output, flush=True)
-  return output, log_file
+  return output, log_output
 
 
 def run_psro(env, oracle, agents, flags_obj, game_params,

@@ -70,6 +70,68 @@ class ForcetekiPsroProgressTest(absltest.TestCase):
     self.assertEqual(first.getvalue(), "hello\n")
     self.assertEqual(second.getvalue(), "hello\n")
 
+  def test_timestamped_output_adds_info_prefix(self):
+    stream = io.StringIO()
+    output = forceteki_psro_progress.TimestampedLineOutput(
+        stream,
+        time_fn=lambda: 0.0,
+        time_formatter=lambda timestamp: "2026-06-23 08:14:32")
+
+    written = output.write("[progress] psro started\n")
+
+    self.assertEqual(written, len("[progress] psro started\n"))
+    self.assertEqual(
+        stream.getvalue(),
+        "2026-06-23 08:14:32 INFO [progress] psro started\n")
+
+  def test_timestamped_output_classifies_warnings_and_errors(self):
+    stream = io.StringIO()
+    output = forceteki_psro_progress.TimestampedLineOutput(
+        stream,
+        time_fn=lambda: 0.0,
+        time_formatter=lambda timestamp: "2026-06-23 08:14:32")
+
+    output.write("Warning: retrying rollout\n")
+    output.write("Worker error: failed rollout\n")
+
+    self.assertEqual(
+        stream.getvalue().splitlines(),
+        [
+            "2026-06-23 08:14:32 WARNING Warning: retrying rollout",
+            "2026-06-23 08:14:32 ERROR Worker error: failed rollout",
+        ])
+
+  def test_timestamped_output_buffers_partial_lines(self):
+    stream = io.StringIO()
+    output = forceteki_psro_progress.TimestampedLineOutput(
+        stream,
+        time_fn=lambda: 0.0,
+        time_formatter=lambda timestamp: "2026-06-23 08:14:32")
+
+    self.assertEqual(output.write("partial "), len("partial "))
+    self.assertEmpty(stream.getvalue())
+    output.write("line\n")
+
+    self.assertEqual(
+        stream.getvalue(),
+        "2026-06-23 08:14:32 INFO partial line\n")
+
+  def test_timestamped_output_prefixes_each_physical_line(self):
+    stream = io.StringIO()
+    output = forceteki_psro_progress.TimestampedLineOutput(
+        stream,
+        time_fn=lambda: 0.0,
+        time_formatter=lambda timestamp: "2026-06-23 08:14:32")
+
+    output.write("Meta game: [array([[1.]])\n array([[-1.]])]\n")
+
+    self.assertEqual(
+        stream.getvalue().splitlines(),
+        [
+            "2026-06-23 08:14:32 INFO Meta game: [array([[1.]])",
+            "2026-06-23 08:14:32 INFO  array([[-1.]])]",
+        ])
+
   def test_start_update_and_done_lines_include_elapsed_and_eta(self):
     clock = FakeClock()
     output = io.StringIO()

@@ -11,6 +11,9 @@ import time
 
 DEFAULT_LOG_DIR = "forceteki_psro_logs"
 DEFAULT_LOG_FILENAME = "forceteki_psro.log"
+_DEFAULT_LOG_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+_ERROR_MARKERS = ("error", "exception", "traceback", "fatal", "critical")
+_WARNING_MARKERS = ("warning", "warn")
 
 
 class TeeOutput:
@@ -33,6 +36,42 @@ class TeeOutput:
       close = getattr(output, "close", None)
       if close is not None and output is not sys.stdout:
         close()
+
+
+class TimestampedLineOutput:
+  """File-like writer that prefixes complete lines with time and severity."""
+
+  def __init__(self, output, time_fn=None, time_formatter=None):
+    self._output = output
+    self._time_fn = time_fn or time.time
+    self._time_formatter = time_formatter or self._default_time_formatter
+    self._buffer = ""
+
+  def write(self, text):
+    self._buffer += text
+    while "\n" in self._buffer:
+      line, self._buffer = self._buffer.split("\n", 1)
+      self._write_line(line)
+    return len(text)
+
+  def flush(self):
+    self._output.flush()
+
+  def close(self):
+    if self._buffer:
+      self._write_line(self._buffer)
+      self._buffer = ""
+    close = getattr(self._output, "close", None)
+    if close is not None:
+      close()
+
+  def _write_line(self, line):
+    timestamp = self._time_formatter(self._time_fn())
+    level = _line_level(line)
+    self._output.write(f"{timestamp} {level} {line}\n")
+
+  def _default_time_formatter(self, timestamp):
+    return time.strftime(_DEFAULT_LOG_TIME_FORMAT, time.localtime(timestamp))
 
 
 def resolve_log_path(flags_obj):
@@ -140,3 +179,12 @@ class TextProgressReporter:
 
 def _format_fields(fields):
   return [f"{key}={value}" for key, value in fields.items()]
+
+
+def _line_level(line):
+  normalized = line.lower()
+  if any(marker in normalized for marker in _ERROR_MARKERS):
+    return "ERROR"
+  if any(marker in normalized for marker in _WARNING_MARKERS):
+    return "WARNING"
+  return "INFO"
