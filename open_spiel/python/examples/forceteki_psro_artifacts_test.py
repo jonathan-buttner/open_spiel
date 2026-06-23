@@ -7,6 +7,7 @@ import tempfile
 
 from absl.testing import absltest
 import numpy as np
+import torch
 
 from open_spiel.python import rl_environment
 from open_spiel.python.examples import forceteki_psro_artifacts
@@ -51,6 +52,26 @@ class ForcetekiPsroArtifactsTest(absltest.TestCase):
     for key, value in policy.get_weights().items():
       np.testing.assert_array_equal(
           value.numpy(), restored.get_weights()[key].numpy())
+
+  def test_policy_checkpoint_widens_old_action_head(self):
+    env = rl_environment.Environment("kuhn_poker")
+    old_kwargs = _ppo_kwargs(env)
+    old_kwargs["num_actions"] = 512
+    checkpoint_policy = ForcetekiPPOPolicy(env, 0, **old_kwargs)
+    checkpoint = checkpoint_policy.checkpoint(player_id=0, policy_index=0)
+    checkpoint["kwargs"]["num_actions"] = 512
+    env.action_spec = lambda: {"num_actions": 4096}
+
+    restored = ForcetekiPPOPolicy.from_checkpoint(env, checkpoint)
+
+    self.assertEqual(restored._num_actions, env.action_spec()["num_actions"])
+    old_weights = checkpoint["network_state_dict"]["action_head.weight"]
+    old_bias = checkpoint["network_state_dict"]["action_head.bias"]
+    restored_weights = restored.get_weights()["action_head.weight"]
+    restored_bias = restored.get_weights()["action_head.bias"]
+    torch.testing.assert_close(
+        restored_weights[:old_weights.shape[0]], old_weights)
+    torch.testing.assert_close(restored_bias[:old_bias.shape[0]], old_bias)
 
   def test_policy_population_save_and_load(self):
     env = rl_environment.Environment("kuhn_poker")

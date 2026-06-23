@@ -208,19 +208,60 @@ class ForcetekiPPOPolicy(policy.Policy):
 
   def load_checkpoint(self, checkpoint, load_optimizer=True):
     """Loads network and optimizer state from a checkpoint payload."""
-    self._network.load_state_dict(checkpoint["network_state_dict"])
-    if load_optimizer and checkpoint.get("optimizer_state_dict") is not None:
+    resized_action_head = self._load_network_state_dict(
+        checkpoint["network_state_dict"])
+    if (not resized_action_head and load_optimizer and
+        checkpoint.get("optimizer_state_dict") is not None):
       self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     if checkpoint.get("frozen", True):
       self.freeze()
     else:
       self.unfreeze()
 
+  def _load_network_state_dict(self, checkpoint_state_dict):
+    """Loads network weights, widening old smaller action heads if needed."""
+    current_state_dict = self._network.state_dict()
+    resized_action_head = False
+    missing_keys = set(current_state_dict) - set(checkpoint_state_dict)
+    if missing_keys:
+      raise ValueError(
+          "Forceteki PPO checkpoint is missing tensors: "
+          f"{sorted(missing_keys)}")
+
+    for key, checkpoint_value in checkpoint_state_dict.items():
+      if key not in current_state_dict:
+        raise ValueError(f"Unexpected Forceteki PPO checkpoint tensor: {key}")
+
+      current_value = current_state_dict[key]
+      if checkpoint_value.shape == current_value.shape:
+        current_state_dict[key] = checkpoint_value
+        continue
+
+      if (key.startswith("action_head.") and
+          checkpoint_value.ndim == current_value.ndim and
+          checkpoint_value.shape[0] <= current_value.shape[0] and
+          checkpoint_value.shape[1:] == current_value.shape[1:]):
+        current_value = current_value.clone()
+        checkpoint_value = checkpoint_value.to(
+            device=current_value.device, dtype=current_value.dtype)
+        current_value[:checkpoint_value.shape[0]] = checkpoint_value
+        current_state_dict[key] = current_value
+        resized_action_head = True
+        continue
+
+      raise ValueError(
+          f"Cannot load Forceteki PPO checkpoint tensor {key}: "
+          f"{tuple(checkpoint_value.shape)} into {tuple(current_value.shape)}")
+
+    self._network.load_state_dict(current_state_dict)
+    return resized_action_head
+
   @classmethod
   def from_checkpoint(cls, env, checkpoint, player_id=None, device=None,
                       load_optimizer=True):
     """Builds a policy from a checkpoint payload."""
     kwargs = dict(checkpoint["kwargs"])
+    kwargs["num_actions"] = env.action_spec()["num_actions"]
     if device is not None:
       kwargs["device"] = device
     restored_player_id = (
