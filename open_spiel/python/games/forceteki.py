@@ -739,13 +739,23 @@ class _DeckPoolSampler:
     self._reshuffle_locked()
 
   def sample_pair(self):
+    rollout_key = _rollout_deck_key()
+    if rollout_key is not None:
+      return self._sample_keyed_pair(rollout_key)
     with self._lock:
       first_index = self._draw_one_locked()
       second_index = self._draw_one_locked(exclude=first_index)
-      return [
-          self._copy_deck(self._decks[first_index]),
-          self._copy_deck(self._decks[second_index]),
-      ]
+      return self._deck_pair(first_index, second_index)
+
+  def _sample_keyed_pair(self, rollout_key):
+    bag = list(range(len(self._decks)))
+    rng = random.Random(_stable_int_seed(self._seed, rollout_key))
+    rng.shuffle(bag)
+    first_index = bag[0]
+    second_index = first_index
+    if len(bag) > 1:
+      second_index = next(index for index in bag[1:] if index != first_index)
+    return self._deck_pair(first_index, second_index)
 
   def _draw_one_locked(self, exclude=None):
     self._ensure_bag_locked()
@@ -800,11 +810,37 @@ class _DeckPoolSampler:
   def _copy_deck(self, deck):
     return json.loads(json.dumps(deck))
 
+  def _deck_pair(self, first_index, second_index):
+    return [
+        self._copy_deck(self._decks[first_index]),
+        self._copy_deck(self._decks[second_index]),
+    ]
 
-def _stable_int_seed(seed, epoch):
+
+def _stable_int_seed(seed, salt):
   digest = hashlib.sha256(
-      repr((str(seed), int(epoch))).encode("utf-8")).hexdigest()
+      repr((str(seed), salt)).encode("utf-8")).hexdigest()
   return int(digest[:16], 16)
+
+
+def _rollout_deck_key():
+  context = _TRACE_CONTEXT.get()
+  rollout_type = context.get("rolloutType")
+  if rollout_type == "evaluation":
+    profile_index = context.get("profileIndex")
+    simulation_index = context.get("simulationIndex")
+    if profile_index is not None and simulation_index is not None:
+      return (
+          "evaluation",
+          context.get("seed"),
+          tuple(profile_index),
+          int(simulation_index),
+      )
+  if rollout_type == "training":
+    training_rollout = context.get("trainingRollout")
+    if training_rollout is not None:
+      return ("training", context.get("seed"), int(training_rollout))
+  return None
 
 
 def _deck_pool_path(params):

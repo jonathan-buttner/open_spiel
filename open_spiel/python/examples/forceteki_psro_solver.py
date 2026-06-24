@@ -282,16 +282,17 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
   def _sample_one_episode_with_diagnostics(self, policies, profile_index,
                                            sim_index, policy_locks):
     rng = random.Random(_rollout_seed(self._seed, profile_index, sim_index))
-    state = self._game.new_initial_state()
-    try:
-      with forceteki.forceteki_trace_context(
-          rolloutType="evaluation",
-          profileIndex=list(profile_index),
-          simulationIndex=sim_index):
+    with forceteki.forceteki_trace_context(
+        rolloutType="evaluation",
+        seed=self._seed,
+        profileIndex=list(profile_index),
+        simulationIndex=sim_index):
+      state = self._game.new_initial_state()
+      try:
         return _sample_episode_with_diagnostics(
             state, policies, rng=rng, policy_locks=policy_locks)
-    finally:
-      _close_state(state)
+      finally:
+        _close_state(state)
 
   def _print_rollout_diagnostics(self, profile_index, num_episodes,
                                  averages, reason_counts, nonzero_returns,

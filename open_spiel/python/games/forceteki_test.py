@@ -200,6 +200,7 @@ class ForcetekiTest(absltest.TestCase):
             "FORCETEKI_DECKS_PATH",
             "FORCETEKI_PLAYER0_DECK_PATH",
             "FORCETEKI_PLAYER1_DECK_PATH",
+            "FORCETEKI_SEED",
         )
     }
     forceteki._TRACE_GLOBAL_ACTION_COUNT = 0
@@ -368,6 +369,68 @@ class ForcetekiTest(absltest.TestCase):
     ]
 
     self.assertEqual(first_sequence, second_sequence)
+
+  def test_deck_pool_sampler_keyed_pair_is_independent_of_call_order(self):
+    temp_dir = tempfile.mkdtemp()
+    for index in range(6):
+      _write_deck(temp_dir, f"deck-{index}.json", f"deck-{index}")
+    first_sampler = forceteki._DeckPoolSampler(temp_dir, "seed")
+    second_sampler = forceteki._DeckPoolSampler(temp_dir, "seed")
+
+    with forceteki.forceteki_trace_context(
+        rolloutType="evaluation",
+        seed=1,
+        profileIndex=[0, 1],
+        simulationIndex=7):
+      first_a = [deck["deckID"] for deck in first_sampler.sample_pair()]
+    with forceteki.forceteki_trace_context(
+        rolloutType="evaluation",
+        seed=1,
+        profileIndex=[2, 3],
+        simulationIndex=11):
+      first_b = [deck["deckID"] for deck in first_sampler.sample_pair()]
+    with forceteki.forceteki_trace_context(
+        rolloutType="evaluation",
+        seed=1,
+        profileIndex=[2, 3],
+        simulationIndex=11):
+      second_b = [deck["deckID"] for deck in second_sampler.sample_pair()]
+    with forceteki.forceteki_trace_context(
+        rolloutType="evaluation",
+        seed=1,
+        profileIndex=[0, 1],
+        simulationIndex=7):
+      second_a = [deck["deckID"] for deck in second_sampler.sample_pair()]
+
+    self.assertEqual(first_a, second_a)
+    self.assertEqual(first_b, second_b)
+
+  def test_deck_pool_sampler_keyed_pair_changes_with_seed(self):
+    temp_dir = tempfile.mkdtemp()
+    for index in range(6):
+      _write_deck(temp_dir, f"deck-{index}.json", f"deck-{index}")
+    first_sampler = forceteki._DeckPoolSampler(temp_dir, "seed-1")
+    second_sampler = forceteki._DeckPoolSampler(temp_dir, "seed-2")
+
+    first_sequence = []
+    second_sequence = []
+    for simulation_index in range(6):
+      with forceteki.forceteki_trace_context(
+          rolloutType="evaluation",
+          seed=1,
+          profileIndex=[0, 1],
+          simulationIndex=simulation_index):
+        first_sequence.append(
+            [deck["deckID"] for deck in first_sampler.sample_pair()])
+      with forceteki.forceteki_trace_context(
+          rolloutType="evaluation",
+          seed=2,
+          profileIndex=[0, 1],
+          simulationIndex=simulation_index):
+        second_sequence.append(
+            [deck["deckID"] for deck in second_sampler.sample_pair()])
+
+    self.assertNotEqual(first_sequence, second_sequence)
 
   def test_deck_pool_path_passes_sampled_decks_to_worker(self):
     self.patch_node_worker()

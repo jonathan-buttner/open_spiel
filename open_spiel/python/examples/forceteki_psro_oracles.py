@@ -14,8 +14,9 @@ from open_spiel.python.games import forceteki
 class ForcetekiTraceRLOracle(rl_oracle.RLOracle):
   """RL oracle that marks base PG/DQN training rollouts in Forceteki traces."""
 
-  def __init__(self, *args, **kwargs):
+  def __init__(self, *args, seed=1, **kwargs):
     super().__init__(*args, **kwargs)
+    self._seed = int(seed)
     self._forceteki_trace_training_rollout = 0
     self._progress_reporter = None
     self._progress_iteration = None
@@ -53,6 +54,7 @@ class ForcetekiTraceRLOracle(rl_oracle.RLOracle):
     try:
       with forceteki.forceteki_trace_context(
           rolloutType="training",
+          seed=self._seed,
           trainingRollout=self._forceteki_trace_training_rollout):
         return super()._rollout(
             game, agents, **oracle_specific_execution_kwargs)
@@ -92,16 +94,17 @@ class ForcetekiPPOOracle(ForcetekiTraceRLOracle):
   def _rollout(self, game, agents, **oracle_specific_execution_kwargs):
     del oracle_specific_execution_kwargs
     self._forceteki_trace_training_rollout += 1
-    state = game.new_initial_state()
-    live_agents = [
-        agent for agent in agents
-        if isinstance(agent, ForcetekiPPOPolicy) and not agent.is_frozen()
-    ]
+    with forceteki.forceteki_trace_context(
+        rolloutType="training",
+        seed=self._seed,
+        trainingRollout=self._forceteki_trace_training_rollout):
+      state = game.new_initial_state()
+      live_agents = [
+          agent for agent in agents
+          if isinstance(agent, ForcetekiPPOPolicy) and not agent.is_frozen()
+      ]
 
-    try:
-      with forceteki.forceteki_trace_context(
-          rolloutType="training",
-          trainingRollout=self._forceteki_trace_training_rollout):
+      try:
         while not state.is_terminal():
           if state.is_chance_node():
             outcomes, probs = zip(*state.chance_outcomes())
@@ -126,5 +129,5 @@ class ForcetekiPPOOracle(ForcetekiTraceRLOracle):
 
         for live_agent in live_agents:
           live_agent.finish_episode()
-    finally:
-      _close_state(state)
+      finally:
+        _close_state(state)

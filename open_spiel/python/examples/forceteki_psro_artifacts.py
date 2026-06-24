@@ -22,7 +22,6 @@ BOT_FILENAME = "bot_policy.json"
 CONFIG_FLAG_NAMES = (
     "game_name",
     "n_players",
-    "forceteki_seed",
     "max_episode_steps",
     "forceteki_worker_pool_size",
     "parallel_eval_workers",

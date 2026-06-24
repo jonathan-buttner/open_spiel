@@ -40,6 +40,19 @@ def _ppo_kwargs(env):
 
 class ForcetekiPsroArtifactsTest(absltest.TestCase):
 
+  def test_flags_to_dict_omits_removed_forceteki_seed(self):
+    flags_obj = type("Flags", (), {
+        "game_name": "python_forceteki_swu",
+        "n_players": 2,
+        "seed": 7,
+        "forceteki_seed": "legacy",
+    })()
+
+    flags_dict = forceteki_psro_artifacts.flags_to_dict(flags_obj)
+
+    self.assertEqual(flags_dict["seed"], 7)
+    self.assertNotIn("forceteki_seed", flags_dict)
+
   def test_policy_checkpoint_round_trips_weights_and_optimizer(self):
     env = rl_environment.Environment("kuhn_poker")
     policy = ForcetekiPPOPolicy(env, 0, **_ppo_kwargs(env))

@@ -55,7 +55,6 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string("game_name", "python_forceteki_swu", "Game name.")
 flags.DEFINE_integer("n_players", 2, "The number of players.")
-flags.DEFINE_string("forceteki_seed", "", "Optional Forceteki worker seed.")
 flags.DEFINE_integer("max_episode_steps", 1000,
                      "OpenSpiel-side cap for Forceteki rollout length.")
 flags.DEFINE_integer("forceteki_worker_pool_size", 0,
@@ -167,9 +166,8 @@ def _game_params_from_flags(flags_obj):
       "players": flags_obj.n_players,
       "max_game_length": flags_obj.max_episode_steps,
       "worker_pool_size": flags_obj.forceteki_worker_pool_size,
+      "seed": str(flags_obj.seed),
   }
-  if flags_obj.forceteki_seed:
-    params["seed"] = flags_obj.forceteki_seed
   deck_pool_path = (
       flags_obj.deck_pool_path or os.environ.get("FORCETEKI_DECK_POOL_PATH"))
   if deck_pool_path:
@@ -242,8 +240,7 @@ def main(argv):
         "paths, not both")
 
   np.random.seed(FLAGS.seed)
-  if FLAGS.forceteki_seed:
-    os.environ["FORCETEKI_SEED"] = FLAGS.forceteki_seed
+  os.environ["FORCETEKI_SEED"] = str(FLAGS.seed)
   if FLAGS.debug:
     trace_path = _debug_trace_path(FLAGS.debug_dir)
     os.environ["FORCETEKI_TRACE_PATH"] = trace_path

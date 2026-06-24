@@ -43,7 +43,8 @@ def init_pg_responder(env, flags_obj):
       agent_kwargs,
       number_training_episodes=flags_obj.number_training_episodes,
       self_play_proportion=flags_obj.self_play_proportion,
-      sigma=flags_obj.sigma)
+      sigma=flags_obj.sigma,
+      seed=flags_obj.seed)
   agents = [agent_class(env, player_id, **agent_kwargs)
             for player_id in range(flags_obj.n_players)]
   for agent in agents:
@@ -73,7 +74,8 @@ def init_dqn_responder(env, flags_obj):
       agent_kwargs,
       number_training_episodes=flags_obj.number_training_episodes,
       self_play_proportion=flags_obj.self_play_proportion,
-      sigma=flags_obj.sigma)
+      sigma=flags_obj.sigma,
+      seed=flags_obj.seed)
   agents = [agent_class(env, player_id, **agent_kwargs)
             for player_id in range(flags_obj.n_players)]
   for agent in agents:
@@ -114,7 +116,8 @@ def init_ppo_responder(env, flags_obj):
       agent_kwargs,
       number_training_episodes=flags_obj.number_training_episodes,
       self_play_proportion=flags_obj.self_play_proportion,
-      sigma=flags_obj.sigma)
+      sigma=flags_obj.sigma,
+      seed=flags_obj.seed)
   agents = [agent_class(env, player_id, **agent_kwargs)
             for player_id in range(flags_obj.n_players)]
   for agent in agents:
