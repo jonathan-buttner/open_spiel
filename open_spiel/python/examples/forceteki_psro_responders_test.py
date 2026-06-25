@@ -49,7 +49,8 @@ class FakeSolver:
   interrupt_controller = None
 
   def __init__(self, *args, **kwargs):
-    del args, kwargs
+    del args
+    self.kwargs = kwargs
     self.iteration_calls = 0
     self.progress_contexts = []
     FakeSolver.instances.append(self)
@@ -97,11 +98,45 @@ class ForcetekiPsroRespondersTest(absltest.TestCase):
           interrupt_controller=interrupt_controller)
 
     self.assertIs(solver, FakeSolver.instances[0])
+    self.assertFalse(FakeSolver.instances[0].kwargs["defer_initial_update"])
     self.assertEqual(solver.iteration_calls, 1)
     self.assertEqual(
         [call.args[4] for call in save_run_artifacts.call_args_list],
         [0, 1])
     self.assertEqual(solver.progress_contexts, [(1, 3)])
+
+  def test_run_psro_defers_initial_update_when_restoring(self):
+    interrupt_controller = FakeInterruptController()
+    FakeSolver.interrupt_controller = interrupt_controller
+    restored_policies = [["p0", "p0_1", "p0_2"], ["p1", "p1_1", "p1_2"]]
+    restored_solver_state = {"completed_iterations": 2}
+
+    with mock.patch.object(
+        forceteki_psro_responders,
+        "DiagnosticPSROSolver",
+        FakeSolver), mock.patch.object(
+            forceteki_psro_responders.forceteki_psro_artifacts,
+            "restore_solver_state") as restore_solver_state, mock.patch.object(
+                forceteki_psro_responders.forceteki_psro_artifacts,
+                "save_run_artifacts") as save_run_artifacts:
+      solver = forceteki_psro_responders.run_psro(
+          FakeEnv(),
+          oracle=object(),
+          agents=["a0", "a1"],
+          flags_obj=_flags(),
+          game_params={"players": 2},
+          restored_policies=restored_policies,
+          restored_solver_state=restored_solver_state,
+          interrupt_controller=interrupt_controller)
+
+    self.assertIs(solver, FakeSolver.instances[0])
+    self.assertTrue(FakeSolver.instances[0].kwargs["defer_initial_update"])
+    restore_solver_state.assert_called_once_with(
+        solver, restored_policies, restored_solver_state)
+    self.assertEqual(solver.progress_contexts, [(3, 3)])
+    self.assertEqual(
+        [call.args[4] for call in save_run_artifacts.call_args_list],
+        [2, 3])
 
   def test_run_psro_writes_log_file_when_enabled(self):
     temp_dir = tempfile.mkdtemp()

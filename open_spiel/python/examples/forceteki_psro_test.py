@@ -2,9 +2,14 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
+import contextlib
+import io
 import os
-import types
+import tempfile
+from types import SimpleNamespace
+from unittest import mock
 
+from absl import app
 from absl import flags
 from absl.testing import absltest
 
@@ -13,17 +18,20 @@ from open_spiel.python.examples import forceteki_psro
 
 def _flags(**overrides):
   values = {
-      "n_players": 2,
-      "max_episode_steps": 1000,
-      "forceteki_worker_pool_size": 0,
-      "seed": 17,
       "deck_pool_path": "",
       "decks_path": "",
+      "forceteki_worker_pool_size": 0,
+      "max_episode_steps": 1000,
+      "n_players": 2,
+      "output_dir": "",
       "player0_deck_path": "",
       "player1_deck_path": "",
+      "ppo_device": "cpu",
+      "resume_from": "",
+      "seed": 17,
   }
   values.update(overrides)
-  return types.SimpleNamespace(**values)
+  return SimpleNamespace(**values)
 
 
 class ForcetekiPsroTest(absltest.TestCase):
@@ -49,6 +57,48 @@ class ForcetekiPsroTest(absltest.TestCase):
 
     self.assertEqual(params["seed"], "5")
     self.assertEqual(params["deck_pool_path"], "/tmp/deck-pool")
+
+  def test_missing_resume_dir_with_output_dir_starts_fresh(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      resume_from = os.path.join(temp_dir, "missing_run")
+      output_dir = os.path.join(temp_dir, "new_run")
+      output = io.StringIO()
+
+      with contextlib.redirect_stdout(output):
+        restored = forceteki_psro._restore_resume_state(
+            _flags(resume_from=resume_from, output_dir=output_dir),
+            env=object())
+
+    self.assertEqual(restored, (None, None, None))
+    self.assertIn("Resume directory not found", output.getvalue())
+    self.assertIn(output_dir, output.getvalue())
+
+  def test_missing_resume_dir_without_output_dir_errors(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      resume_from = os.path.join(temp_dir, "missing_run")
+
+      with self.assertRaisesRegex(app.UsageError, "--output_dir is empty"):
+        forceteki_psro._restore_resume_state(
+            _flags(resume_from=resume_from),
+            env=object())
+
+  def test_existing_resume_path_that_is_not_directory_errors(self):
+    with tempfile.NamedTemporaryFile() as temp_file:
+      with self.assertRaisesRegex(app.UsageError, "not a directory"):
+        forceteki_psro._restore_resume_state(
+            _flags(resume_from=temp_file.name, output_dir="/tmp/new_run"),
+            env=object())
+
+  def test_existing_malformed_resume_dir_does_not_fall_back_to_fresh(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      with mock.patch.object(
+          forceteki_psro.forceteki_psro_artifacts,
+          "load_policy_population",
+          side_effect=ValueError("bad artifacts")):
+        with self.assertRaisesRegex(ValueError, "bad artifacts"):
+          forceteki_psro._restore_resume_state(
+              _flags(resume_from=temp_dir, output_dir="/tmp/new_run"),
+              env=object())
 
 
 if __name__ == "__main__":

@@ -231,6 +231,7 @@ class ForcetekiPsroProgressTest(absltest.TestCase):
     reporter = FakeProgressReporter()
     solver = DiagnosticPSROSolver.__new__(DiagnosticPSROSolver)
     solver._num_players = 2
+    solver.symmetric_game = False
     solver._progress_reporter = reporter
     solver._progress_iteration = 1
     solver._progress_total_iterations = 2
@@ -249,7 +250,7 @@ class ForcetekiPsroProgressTest(absltest.TestCase):
         total_number_policies=[2, 2],
         number_older_policies=[1, 1],
         number_new_policies=[1, 1])
-    self.assertEqual(missing, 4)
+    self.assertEqual(missing, 3)
 
     solver._evaluation_progress((1, 0))
     solver._evaluation_rollouts_done = 7

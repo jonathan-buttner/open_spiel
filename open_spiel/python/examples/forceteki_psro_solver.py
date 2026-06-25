@@ -247,6 +247,8 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
   def _count_missing_profiles(self, meta_games, total_number_policies,
                               number_older_policies, number_new_policies):
     count = 0
+    counted_meta_games = [np.array(meta_game, copy=True)
+                          for meta_game in meta_games]
     for current_player in range(self._num_players):
       range_iterators = [
           range(total_number_policies[k]) for k in range(current_player)
@@ -257,8 +259,20 @@ class DiagnosticPSROSolver(psro_v2.PSROSolver):
       for current_index in itertools.product(*range_iterators):
         used_index = list(current_index)
         used_index[current_player] += number_older_policies[current_player]
-        if np.isnan(meta_games[current_player][tuple(used_index)]):
-          count += 1
+        used_tuple = tuple(used_index)
+        if not np.isnan(counted_meta_games[current_player][used_tuple]):
+          continue
+        count += 1
+        if self.symmetric_game:
+          player_permutations = list(itertools.permutations(
+              list(range(self._num_players))))
+          for permutation in player_permutations:
+            permuted_tuple = tuple([used_index[i] for i in permutation])
+            for player in range(self._num_players):
+              counted_meta_games[player][permuted_tuple] = 0.0
+        else:
+          for player in range(self._num_players):
+            counted_meta_games[player][used_tuple] = 0.0
     return count
 
   def _evaluation_progress(self, profile_index):

@@ -206,6 +206,37 @@ def _seed_agents_from_policy(flags_obj, env, agents):
   return seeded_agents
 
 
+def _restore_resume_state(flags_obj, env):
+  """Loads resume artifacts, or allows a missing directory for fresh output."""
+  if not flags_obj.resume_from:
+    return None, None, None
+
+  if os.path.exists(flags_obj.resume_from):
+    if not os.path.isdir(flags_obj.resume_from):
+      raise app.UsageError(
+          f"--resume_from exists but is not a directory: "
+          f"{flags_obj.resume_from}")
+    restored_policies = forceteki_psro_artifacts.load_policy_population(
+        flags_obj.resume_from, env, device=flags_obj.ppo_device)
+    restored_solver_state = forceteki_psro_artifacts.load_solver_state(
+        flags_obj.resume_from)
+    forceteki_psro_artifacts.restore_rng_state(flags_obj.resume_from)
+    restored_agents = [
+        player_policies[0] for player_policies in restored_policies
+    ]
+    return restored_policies, restored_solver_state, restored_agents
+
+  if flags_obj.output_dir:
+    print(
+        f"Resume directory not found: {flags_obj.resume_from}. "
+        f"Starting a fresh run and writing artifacts to {flags_obj.output_dir}.")
+    return None, None, None
+
+  raise app.UsageError(
+      f"--resume_from does not exist and --output_dir is empty: "
+      f"{flags_obj.resume_from}")
+
+
 def main(argv):
   if len(argv) > 1:
     raise app.UsageError("Too many command-line arguments.")
@@ -255,15 +286,10 @@ def main(argv):
         FLAGS.game_name, game_params)
     env = rl_environment.Environment(game)
     oracle, agents = init_oracle(env, FLAGS)
-    restored_policies = None
-    restored_solver_state = None
-    if FLAGS.resume_from:
-      restored_policies = forceteki_psro_artifacts.load_policy_population(
-          FLAGS.resume_from, env, device=FLAGS.ppo_device)
-      restored_solver_state = forceteki_psro_artifacts.load_solver_state(
-          FLAGS.resume_from)
-      forceteki_psro_artifacts.restore_rng_state(FLAGS.resume_from)
-      agents = [player_policies[0] for player_policies in restored_policies]
+    restored_policies, restored_solver_state, restored_agents = (
+        _restore_resume_state(FLAGS, env))
+    if restored_agents is not None:
+      agents = restored_agents
     else:
       agents = _seed_agents_from_policy(FLAGS, env, agents)
 

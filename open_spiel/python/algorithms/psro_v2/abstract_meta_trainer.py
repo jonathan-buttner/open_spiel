@@ -107,6 +107,7 @@ class AbstractMetaTrainer(object):
                training_strategy_selector=_DEFAULT_STRATEGY_SELECTION_METHOD,
                symmetric_game=False,
                number_policies_selected=1,
+               defer_initial_update=False,
                **kwargs):
     """Abstract Initialization for meta trainers.
 
@@ -143,6 +144,9 @@ class AbstractMetaTrainer(object):
         game or not (False).
       number_policies_selected: Maximum number of new policies to train for each
         player at each PSRO iteration.
+      defer_initial_update: If True, skip the initial empirical game update and
+        meta-strategy computation. This is intended for callers that immediately
+        restore a serialized trainer state.
       **kwargs: kwargs for meta strategy computation and training strategy
         selection
     """
@@ -171,8 +175,9 @@ class AbstractMetaTrainer(object):
     self._kwargs = kwargs
 
     self._initialize_policy(initial_policies)
-    self._initialize_game_state()
-    self.update_meta_strategies()
+    if not defer_initial_update:
+      self._initialize_game_state()
+      self.update_meta_strategies()
 
   def _initialize_policy(self, initial_policies):
     return NotImplementedError(

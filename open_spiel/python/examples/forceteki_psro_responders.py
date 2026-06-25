@@ -220,7 +220,8 @@ def _run_psro(env, oracle, agents, flags_obj, game_params, output,
       parallel_eval_workers=flags_obj.parallel_eval_workers,
       seed=flags_obj.seed,
       progress_reporter=progress_reporter,
-      output=output)
+      output=output,
+      defer_initial_update=restored_solver_state is not None)
 
   start_time = time.time()
   start_iteration = 0
