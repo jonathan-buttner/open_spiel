@@ -4,6 +4,8 @@
 
 """RL oracles for the Forceteki PSRO example."""
 
+import numpy as np
+
 from open_spiel.python.algorithms.psro_v2 import rl_oracle
 from open_spiel.python.algorithms.psro_v2 import utils
 from open_spiel.python.examples.forceteki_psro_ppo import ForcetekiPPOPolicy
@@ -65,17 +67,20 @@ class ForcetekiTraceRLOracle(rl_oracle.RLOracle):
   def _training_progress(self, episodes_per_oracle):
     if not self._progress_enabled():
       return
-    total = episodes_per_oracle.size * (int(self._number_training_episodes) + 1)
-    current = int(episodes_per_oracle.sum())
-    display_current = min(current, total) if total > 0 else current
+    target_per_policy = int(self._number_training_episodes) + 1
+    total = episodes_per_oracle.size * target_per_policy
+    capped_episodes = np.minimum(episodes_per_oracle, target_per_policy)
+    current = int(capped_episodes.sum())
+    completed_policies = int(np.sum(episodes_per_oracle >= target_per_policy))
     self._progress_reporter.update(
         "training",
         "episodes",
-        display_current,
+        current,
         total,
-        force=current >= total,
+        force=completed_policies == episodes_per_oracle.size,
         iteration=f"{self._progress_iteration}/"
-        f"{self._progress_total_iterations}")
+        f"{self._progress_total_iterations}",
+        completed_policies=f"{completed_policies}/{episodes_per_oracle.size}")
 
   def _progress_enabled(self):
     return (self._progress_reporter is not None and

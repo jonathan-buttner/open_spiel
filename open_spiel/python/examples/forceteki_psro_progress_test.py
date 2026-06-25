@@ -218,14 +218,20 @@ class ForcetekiPsroProgressTest(absltest.TestCase):
     oracle._number_training_episodes = 2
 
     oracle._training_progress(np.array([[1], [2]]))
-    oracle._training_progress(np.array([[3], [3]]))
+    oracle._training_progress(np.array([[4], [2]]))
+    oracle._training_progress(np.array([[4], [3]]))
 
     self.assertEqual([update["current"] for update in reporter.updates],
-                     [3, 6])
-    self.assertEqual([update["total"] for update in reporter.updates], [6, 6])
+                     [3, 5, 6])
+    self.assertEqual([update["total"] for update in reporter.updates],
+                     [6, 6, 6])
     self.assertFalse(reporter.updates[0]["force"])
-    self.assertTrue(reporter.updates[1]["force"])
+    self.assertFalse(reporter.updates[1]["force"])
+    self.assertTrue(reporter.updates[2]["force"])
     self.assertEqual(reporter.updates[0]["fields"]["iteration"], "1/2")
+    self.assertEqual(
+        [update["fields"]["completed_policies"] for update in reporter.updates],
+        ["0/2", "1/2", "2/2"])
 
   def test_evaluation_progress_counts_missing_rollouts(self):
     reporter = FakeProgressReporter()
