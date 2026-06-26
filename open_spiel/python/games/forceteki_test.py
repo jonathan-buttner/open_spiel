@@ -120,6 +120,7 @@ def _fake_worker_state(terminal=False):
 class FakeNodeWorker:
   instances = []
   fail_next_reset = False
+  fail_next_step = False
   _lock = threading.Lock()
 
   def __init__(self, params):
@@ -143,6 +144,9 @@ class FakeNodeWorker:
       self.reset_count += 1
       return _fake_worker_state(terminal=False)
     if op == "step":
+      if FakeNodeWorker.fail_next_step:
+        FakeNodeWorker.fail_next_step = False
+        raise RuntimeError("step failed")
       return _fake_worker_state(terminal=True)
     if op == "export_checkpoint":
       return {"actionHistory": []}
@@ -231,8 +235,32 @@ class ForcetekiTest(absltest.TestCase):
     original_worker = forceteki._NodeWorker
     FakeNodeWorker.instances = []
     FakeNodeWorker.fail_next_reset = False
+    FakeNodeWorker.fail_next_step = False
     forceteki._NodeWorker = FakeNodeWorker
     self.addCleanup(lambda: setattr(forceteki, "_NodeWorker", original_worker))
+
+  def read_trace_entries(self, trace_path):
+    with open(trace_path, encoding="utf-8") as trace_file:
+      return [json.loads(line) for line in trace_file]
+
+  def assert_trace_attempt_records_choice(self, entry):
+    self.assertEqual(entry["traceEvent"], "step_attempt")
+    self.assertEqual(entry["rolloutContext"]["rolloutType"], "evaluation")
+    self.assertEqual(entry["gameId"], "fake-game")
+    self.assertEqual(entry["decisionPlayerId"], "player-0")
+    self.assertEqual(entry["phase"], "action")
+    self.assertEqual(entry["turnNumber"], 2)
+    self.assertEqual(entry["preDecisionState"]["gameId"], "fake-game")
+    self.assertEqual(entry["stateView"]["myBaseHealth"], 30)
+    self.assertEqual(entry["stateView"]["opponentBaseHealth"], 28)
+    self.assertEqual(entry["chosenAction"]["actionId"], 1)
+    self.assertEqual(entry["chosenAction"]["id"], "card:attack")
+    self.assertTrue(any(
+        action["actionId"] == entry["chosenAction"]["actionId"]
+        for action in entry["legalActions"]))
+    self.assertEqual(entry["rawLegalActions"], [0, 1])
+    self.assertNotIn("postActionSnapshot", entry)
+    self.assertNotIn("postAction", entry)
 
   def overwrite_state_for_legal_action_test(self, state, legal_decisions):
     state._state = {
@@ -633,31 +661,43 @@ class ForcetekiTest(absltest.TestCase):
         rolloutType="evaluation", profileIndex=[1, 0], simulationIndex=2):
       state.apply_action(1)
 
-    with open(trace_path, encoding="utf-8") as trace_file:
-      entries = [json.loads(line) for line in trace_file]
+    entries = self.read_trace_entries(trace_path)
 
-    self.assertLen(entries, 1)
-    entry = entries[0]
-    self.assertEqual(entry["rolloutContext"]["rolloutType"], "evaluation")
-    self.assertEqual(entry["gameId"], "fake-game")
-    self.assertEqual(entry["decisionPlayerId"], "player-0")
-    self.assertEqual(entry["phase"], "action")
-    self.assertEqual(entry["turnNumber"], 2)
-    self.assertEqual(entry["preDecisionState"]["gameId"], "fake-game")
-    self.assertEqual(entry["postActionSnapshot"]["isComplete"], True)
-    self.assertEqual(entry["stateView"]["myBaseHealth"], 30)
-    self.assertEqual(entry["stateView"]["opponentBaseHealth"], 28)
-    self.assertEqual(entry["chosenAction"]["actionId"], 1)
-    self.assertEqual(entry["chosenAction"]["id"], "card:attack")
-    self.assertTrue(any(
-        action["actionId"] == entry["chosenAction"]["actionId"]
-        for action in entry["legalActions"]))
-    self.assertEqual(entry["rawLegalActions"], [0, 1])
-    self.assertNotIn("observationTensor", entry)
-    self.assertNotIn("observationTensors", entry)
-    self.assertEqual(entry["postAction"]["terminalReason"],
+    self.assertLen(entries, 2)
+    attempt, result = entries
+    self.assert_trace_attempt_records_choice(attempt)
+    self.assertEqual(result["traceEvent"], "step_result")
+    self.assertEqual(result["globalActionCount"], attempt["globalActionCount"])
+    self.assertEqual(result["postActionSnapshot"]["isComplete"], True)
+    self.assertEqual(result["chosenAction"]["actionId"], 1)
+    self.assertEqual(result["chosenAction"]["id"], "card:attack")
+    self.assertNotIn("observationTensor", result)
+    self.assertNotIn("observationTensors", result)
+    self.assertEqual(result["postAction"]["terminalReason"],
                      "forceteki_terminal")
     self.close_forceteki_states(state)
+
+  def test_trace_file_records_attempt_before_failed_step(self):
+    for trace_mode in ("full", "minimal"):
+      with self.subTest(trace_mode=trace_mode):
+        self.patch_node_worker()
+        with tempfile.TemporaryDirectory() as temp_dir:
+          game = pyspiel.load_game("python_forceteki_swu", {
+              "trace_mode": trace_mode,
+              "trace_dir": temp_dir,
+          })
+          state = game.new_initial_state()
+          FakeNodeWorker.fail_next_step = True
+
+          with self.assertRaisesRegex(RuntimeError, "step failed"):
+            with forceteki.forceteki_trace_context(rolloutType="evaluation"):
+              state.apply_action(1)
+
+          trace_path = os.path.join(temp_dir, "worker-0000.ndjson")
+          entries = self.read_trace_entries(trace_path)
+          self.assertLen(entries, 1)
+          self.assert_trace_attempt_records_choice(entries[0])
+          self.close_forceteki_states(state)
 
   def test_trace_mode_off_does_not_create_worker_trace_files(self):
     self.patch_node_worker()
@@ -704,11 +744,13 @@ class ForcetekiTest(absltest.TestCase):
       second.close()
 
       trace_path = os.path.join(temp_dir, "worker-0000.ndjson")
-      with open(trace_path, encoding="utf-8") as trace_file:
-        entries = [json.loads(line) for line in trace_file]
+      entries = self.read_trace_entries(trace_path)
 
       self.assertLen(FakeNodeWorker.instances, 1)
-      self.assertLen(entries, 2)
+      self.assertLen(entries, 4)
+      self.assertEqual(
+          [entry["traceEvent"] for entry in entries],
+          ["step_attempt", "step_result", "step_attempt", "step_result"])
       self.close_forceteki_states(first, second)
 
   def test_trace_mode_minimal_replaces_worker_file_for_next_game(self):
@@ -727,12 +769,15 @@ class ForcetekiTest(absltest.TestCase):
       second.close()
 
       trace_path = os.path.join(temp_dir, "worker-0000.ndjson")
-      with open(trace_path, encoding="utf-8") as trace_file:
-        entries = [json.loads(line) for line in trace_file]
+      entries = self.read_trace_entries(trace_path)
 
       self.assertLen(FakeNodeWorker.instances, 1)
-      self.assertLen(entries, 1)
+      self.assertLen(entries, 2)
       self.assertEqual(entries[0]["globalActionCount"], 2)
+      self.assertEqual(entries[1]["globalActionCount"], 2)
+      self.assertEqual(
+          [entry["traceEvent"] for entry in entries],
+          ["step_attempt", "step_result"])
       self.close_forceteki_states(first, second)
 
   def test_trace_files_are_split_by_checked_out_worker(self):
@@ -751,9 +796,11 @@ class ForcetekiTest(absltest.TestCase):
 
       for worker_id in range(2):
         trace_path = os.path.join(temp_dir, f"worker-{worker_id:04d}.ndjson")
-        with open(trace_path, encoding="utf-8") as trace_file:
-          entries = [json.loads(line) for line in trace_file]
-        self.assertLen(entries, 1)
+        entries = self.read_trace_entries(trace_path)
+        self.assertLen(entries, 2)
+        self.assertEqual(
+            [entry["traceEvent"] for entry in entries],
+            ["step_attempt", "step_result"])
 
       self.close_forceteki_states(first, second)
 
