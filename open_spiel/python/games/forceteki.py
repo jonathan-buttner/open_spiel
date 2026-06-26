@@ -168,11 +168,16 @@ class ForcetekiState(pyspiel.State):
     pre_state = self._state
     legal_action_map = self.forceteki_legal_actions() if trace_path else {}
     forceteki_action = self._forceteki_action_for_open_spiel_action(action)
+    trace_global_action_count = None
+    if trace_path:
+      trace_global_action_count = self._append_trace_attempt_entry(
+          trace_path, action, legal_action_map, pre_state)
     self._apply_forceteki_action(forceteki_action)
     self._remember_action_key(action_key)
     if trace_path:
-      self._append_trace_entry(
-          trace_path, action, legal_action_map, pre_state)
+      self._append_trace_result_entry(
+          trace_path, trace_global_action_count, action, legal_action_map,
+          pre_state)
 
   def _apply_forceteki_action(self, action):
     self._state = self._request_worker("step", {"action": action})
@@ -311,26 +316,34 @@ class ForcetekiState(pyspiel.State):
   def _raw_decision(self, legal_action):
     return legal_action.get("rawAction") or legal_action.get("rawDecision") or {}
 
-  def _append_trace_entry(self, trace_path, action, legal_action_map,
-                          pre_worker_state):
+  def _append_trace_attempt_entry(self, trace_path, action, legal_action_map,
+                                  pre_worker_state):
     global _TRACE_GLOBAL_ACTION_COUNT
     with _TRACE_LOCK:
       _TRACE_GLOBAL_ACTION_COUNT += 1
       global_action_count = _TRACE_GLOBAL_ACTION_COUNT
-      entry = self._trace_entry(
+      entry = self._trace_attempt_entry(
+          global_action_count, action, legal_action_map, pre_worker_state)
+      _write_trace_entry(trace_path, entry)
+      return global_action_count
+
+  def _append_trace_result_entry(self, trace_path, global_action_count, action,
+                                 legal_action_map, pre_worker_state):
+    with _TRACE_LOCK:
+      entry = self._trace_result_entry(
           global_action_count, action, legal_action_map, pre_worker_state)
       _write_trace_entry(trace_path, entry)
 
-  def _trace_entry(self, global_action_count, action, legal_action_map,
-                   pre_worker_state):
+  def _trace_base_entry(self, trace_event, global_action_count, action,
+                        legal_action_map, pre_worker_state):
     pre_state = pre_worker_state.get("state", {})
-    post_state = self._state.get("state", {})
     game_id = pre_state.get("gameId")
     player_id = (
         pre_worker_state.get("currentPlayerId") or
         _action_player_id(legal_action_map.get(action)) or
         _state_active_player_id(pre_state))
     return {
+        "traceEvent": trace_event,
         "globalActionCount": global_action_count,
         "gameId": game_id,
         "actionCount": self._move_number,
@@ -346,6 +359,21 @@ class ForcetekiState(pyspiel.State):
         "rawLegalActions": pre_worker_state.get("legalActions", []),
         "rawLegalDecisions": pre_worker_state.get("legalDecisions", []),
         "chosenAction": _trace_action(action, legal_action_map.get(action)),
+    }
+
+  def _trace_attempt_entry(self, global_action_count, action, legal_action_map,
+                           pre_worker_state):
+    return self._trace_base_entry(
+        "step_attempt", global_action_count, action, legal_action_map,
+        pre_worker_state)
+
+  def _trace_result_entry(self, global_action_count, action, legal_action_map,
+                          pre_worker_state):
+    entry = self._trace_base_entry(
+        "step_result", global_action_count, action, legal_action_map,
+        pre_worker_state)
+    post_state = self._state.get("state", {})
+    entry.update({
         "postActionSnapshot": post_state,
         "postAction": {
             "currentPlayer": self._state.get("currentPlayer"),
@@ -354,7 +382,8 @@ class ForcetekiState(pyspiel.State):
             "terminalReason": self.forceteki_terminal_reason(),
             "returns": self.returns(),
         },
-    }
+    })
+    return entry
 
   def observation_tensor(self, player=None):
     if player is None:
