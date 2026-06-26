@@ -20,6 +20,8 @@ def _flags(**overrides):
   values = {
       "deck_pool_path": "",
       "decks_path": "",
+      "debug": "off",
+      "debug_dir": "forceteki_psro_debug",
       "forceteki_worker_pool_size": 0,
       "max_episode_steps": 1000,
       "n_players": 2,
@@ -43,6 +45,24 @@ class ForcetekiPsroTest(absltest.TestCase):
     params = forceteki_psro._game_params_from_flags(_flags(seed=23))
 
     self.assertEqual(params["seed"], "23")
+    self.assertEqual(params["trace_mode"], "off")
+    self.assertNotIn("trace_dir", params)
+
+  def test_game_params_include_trace_dir_when_debug_enabled(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      params = forceteki_psro._game_params_from_flags(
+          _flags(debug="FULL", debug_dir=temp_dir))
+
+      self.assertEqual(params["trace_mode"], "full")
+      self.assertIn("trace_dir", params)
+      self.assertTrue(os.path.isdir(params["trace_dir"]))
+      self.assertTrue(params["trace_dir"].startswith(temp_dir))
+
+  def test_debug_rejects_boolean_values(self):
+    for debug_value in ("True", "False", True, False):
+      with self.subTest(debug_value=debug_value):
+        with self.assertRaisesRegex(app.UsageError, "--debug must be one of"):
+          forceteki_psro._game_params_from_flags(_flags(debug=debug_value))
 
   def test_game_params_include_deck_pool_from_environment(self):
     original_deck_pool_path = os.environ.get("FORCETEKI_DECK_POOL_PATH")

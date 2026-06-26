@@ -27,14 +27,15 @@ export PYTHONHASHSEED=1
   --number_training_episodes=100 \
   --sims_per_entry=20 \
   --verbose=True \
-  --debug=True \
   --forceteki_worker_pool_size=10 \
   --parallel_eval_workers=4 \
   --output_dir=forceteki_runs/run_001 \
-  --resume_from=forceteki_runs/run_001 \
+  --meta_strategy_method=nash \
+  --debug=minimal \
   --deck_pool_path=/Users/jbuttner/proj/home/swu-meta/data/decks
 
 
+# --resume_from=forceteki_runs/run_001 \
 # ./venv/bin/python3 open_spiel/python/examples/forceteki_psro.py \
 #   --game_name=python_forceteki_swu \
 #   --n_players=2 \

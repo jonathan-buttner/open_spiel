@@ -97,10 +97,10 @@ def _install_cleanup_signal_handlers(wait_for_storage=False, output=None):
       output=output).install()
 
 
-def _debug_trace_path(debug_dir):
+def _debug_trace_dir(debug_dir):
   timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
   timestamp = timestamp.replace("+00:00", "Z").replace(":", "-")
   debug_run_dir = os.path.join(
       debug_dir, f"{timestamp}_{os.getpid()}")
   os.makedirs(debug_run_dir, exist_ok=True)
-  return os.path.join(debug_run_dir, "trace.ndjson")
+  return debug_run_dir

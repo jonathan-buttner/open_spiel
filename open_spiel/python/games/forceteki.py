@@ -32,9 +32,15 @@ _LIVE_WORKERS = set()
 _WORKER_POOLS = {}
 _WORKER_REGISTRY_LOCK = threading.Lock()
 _TRACE_PATH_ENV = "FORCETEKI_TRACE_PATH"
+_TRACE_MODE_OFF = "off"
+_TRACE_MODE_FULL = "full"
+_TRACE_MODE_MINIMAL = "minimal"
+_TRACE_MODES = frozenset(
+    (_TRACE_MODE_OFF, _TRACE_MODE_FULL, _TRACE_MODE_MINIMAL))
 _TRACE_CONTEXT = contextvars.ContextVar("forceteki_trace_context", default={})
 _TRACE_LOCK = threading.Lock()
 _TRACE_GLOBAL_ACTION_COUNT = 0
+_TRACE_NEXT_WORKER_ID = 0
 _DECK_POOL_PATH_ENV = "FORCETEKI_DECK_POOL_PATH"
 
 _GAME_TYPE = pyspiel.GameType(
@@ -62,6 +68,10 @@ _GAME_TYPE = pyspiel.GameType(
         "player1_deck_path": "",
         "card_data_path": "",
         "preselected_first_player_id": "",
+        "trace_mode": _TRACE_MODE_OFF,
+        "trace_mode_explicit": False,
+        "trace_dir": "",
+        "trace_path": "",
     })
 
 _GAME_INFO = pyspiel.GameInfo(
@@ -116,6 +126,7 @@ class ForcetekiState(pyspiel.State):
     self._worker = (
         self._worker_pool.acquire() if self._worker_pool is not None
         else _NodeWorker(params))
+    self._trace_path = _prepare_trace_file(self._params, self._worker)
     try:
       if checkpoint is None:
         self._state = self._request_worker(
@@ -153,7 +164,7 @@ class ForcetekiState(pyspiel.State):
   def _apply_action(self, action):
     action = int(action)
     action_key = self._action_loop_key(action)
-    trace_path = _trace_path(self._params)
+    trace_path = self._trace_path
     pre_state = self._state
     legal_action_map = self.forceteki_legal_actions() if trace_path else {}
     forceteki_action = self._forceteki_action_for_open_spiel_action(action)
@@ -436,6 +447,60 @@ def _trace_path(params):
   return str(params.get("trace_path") or os.environ.get(_TRACE_PATH_ENV) or "")
 
 
+def _trace_mode(params):
+  value = params.get("trace_mode")
+  if value is None or str(value) == "":
+    return _TRACE_MODE_FULL if _trace_path(params) else _TRACE_MODE_OFF
+  mode = str(value).lower()
+  if mode not in _TRACE_MODES:
+    raise ValueError(
+        f"Forceteki trace_mode must be one of full, minimal, off: {value}")
+  trace_mode_explicit = _truthy(params.get("trace_mode_explicit"))
+  if mode == _TRACE_MODE_OFF and not trace_mode_explicit and _trace_path(params):
+    return _TRACE_MODE_FULL
+  return mode
+
+
+def _truthy(value):
+  if isinstance(value, bool):
+    return value
+  return str(value).lower() in ("1", "true", "yes")
+
+
+def _worker_trace_id(worker):
+  worker_id = getattr(worker, "worker_id", None)
+  if worker_id is None:
+    return id(worker)
+  return int(worker_id)
+
+
+def _worker_trace_path(params, worker):
+  mode = _trace_mode(params)
+  if mode == _TRACE_MODE_OFF:
+    return ""
+  trace_dir = str(params.get("trace_dir") or "")
+  if trace_dir:
+    return os.path.join(
+        trace_dir, f"worker-{_worker_trace_id(worker):04d}.ndjson")
+  return _trace_path(params)
+
+
+def _prepare_trace_file(params, worker):
+  trace_path = _worker_trace_path(params, worker)
+  if trace_path and _trace_mode(params) == _TRACE_MODE_MINIMAL:
+    _truncate_trace_file(trace_path)
+  return trace_path
+
+
+def _truncate_trace_file(trace_path):
+  directory = os.path.dirname(trace_path)
+  if directory:
+    os.makedirs(directory, exist_ok=True)
+  with _TRACE_LOCK:
+    with open(trace_path, "w", encoding="utf-8"):
+      pass
+
+
 def _write_trace_entry(trace_path, entry):
   directory = os.path.dirname(trace_path)
   if directory:
@@ -552,7 +617,11 @@ class _NodeWorker:
   """Newline-delimited JSON client for Forceteki's simulation worker."""
 
   def __init__(self, params):
+    global _TRACE_NEXT_WORKER_ID
     self._seq = 0
+    with _WORKER_REGISTRY_LOCK:
+      self.worker_id = _TRACE_NEXT_WORKER_ID
+      _TRACE_NEXT_WORKER_ID += 1
     worker_path = _worker_path(params)
     forceteki_path = _forceteki_path(params)
     self._process = subprocess.Popen(

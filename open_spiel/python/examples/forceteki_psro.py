@@ -39,7 +39,7 @@ from open_spiel.python.examples.forceteki_psro_solver import _sample_episode_wit
 from open_spiel.python.examples.forceteki_psro_utils import _INVALID_LOGIT
 from open_spiel.python.examples.forceteki_psro_utils import _NONE_TOKEN
 from open_spiel.python.examples.forceteki_psro_utils import _close_state
-from open_spiel.python.examples.forceteki_psro_utils import _debug_trace_path
+from open_spiel.python.examples.forceteki_psro_utils import _debug_trace_dir
 from open_spiel.python.examples.forceteki_psro_utils import _install_cleanup_signal_handlers
 from open_spiel.python.examples.forceteki_psro_utils import _legal_action_map
 from open_spiel.python.examples.forceteki_psro_utils import _prompt_payload
@@ -139,8 +139,8 @@ flags.DEFINE_string("forceteki_log_dir", "forceteki_psro_logs",
 flags.DEFINE_string("log_file", "",
                     "Explicit Forceteki PSRO log file path. Overrides "
                     "--forceteki_log_dir when set.")
-flags.DEFINE_bool("debug", False,
-                  "Write Forceteki decision trace entries to trace.ndjson.")
+flags.DEFINE_string("debug", "off",
+                    "Forceteki decision trace mode: full, minimal, or off.")
 flags.DEFINE_string("debug_dir", "forceteki_psro_debug",
                     "Directory used for timestamped --debug trace runs.")
 flags.DEFINE_string("output_dir", "",
@@ -161,13 +161,29 @@ flags.DEFINE_string("deck_pool_path", "",
                     "Overrides FORCETEKI_DECK_POOL_PATH when set.")
 
 
+_DEBUG_MODES = frozenset(("full", "minimal", "off"))
+
+
+def _debug_mode_from_flags(flags_obj):
+  debug_value = str(getattr(flags_obj, "debug", "off")).lower()
+  if debug_value not in _DEBUG_MODES:
+    raise app.UsageError(
+        "--debug must be one of: full, minimal, off")
+  return debug_value
+
+
 def _game_params_from_flags(flags_obj):
+  debug_mode = _debug_mode_from_flags(flags_obj)
   params = {
       "players": flags_obj.n_players,
       "max_game_length": flags_obj.max_episode_steps,
       "worker_pool_size": flags_obj.forceteki_worker_pool_size,
       "seed": str(flags_obj.seed),
+      "trace_mode": debug_mode,
+      "trace_mode_explicit": True,
   }
+  if debug_mode != "off":
+    params["trace_dir"] = _debug_trace_dir(flags_obj.debug_dir)
   deck_pool_path = (
       flags_obj.deck_pool_path or os.environ.get("FORCETEKI_DECK_POOL_PATH"))
   if deck_pool_path:
@@ -272,16 +288,14 @@ def main(argv):
 
   np.random.seed(FLAGS.seed)
   os.environ["FORCETEKI_SEED"] = str(FLAGS.seed)
-  if FLAGS.debug:
-    trace_path = _debug_trace_path(FLAGS.debug_dir)
-    os.environ["FORCETEKI_TRACE_PATH"] = trace_path
-    print(f"Forceteki debug trace: {trace_path}")
-
   env = None
   interrupt_controller = _install_cleanup_signal_handlers(
       wait_for_storage=bool(FLAGS.output_dir))
   try:
     game_params = _game_params_from_flags(FLAGS)
+    trace_dir = game_params.get("trace_dir")
+    if trace_dir:
+      print(f"Forceteki debug traces: {trace_dir}")
     game = pyspiel.load_game_as_turn_based(
         FLAGS.game_name, game_params)
     env = rl_environment.Environment(game)

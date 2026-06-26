@@ -19,6 +19,11 @@ from open_spiel.python.examples.forceteki_psro_ppo import ForcetekiPPOPolicy
 from open_spiel.python.examples.forceteki_psro_solver import DiagnosticPSROSolver
 
 
+def _debug_enabled(flags_obj):
+  debug_value = getattr(flags_obj, "debug", "off")
+  return bool(debug_value) and str(debug_value).lower() != "off"
+
+
 def init_pg_responder(env, flags_obj):
   """Initializes a policy-gradient RL oracle and frozen initial policies."""
   info_state_size = env.observation_spec()["info_state"][0]
@@ -216,7 +221,8 @@ def _run_psro(env, oracle, agents, flags_obj, game_params, output,
       prd_gamma=1e-10,
       sample_from_marginals=True,
       symmetric_game=flags_obj.symmetric_game,
-      rollout_diagnostics=flags_obj.rollout_diagnostics or flags_obj.debug,
+      rollout_diagnostics=flags_obj.rollout_diagnostics or _debug_enabled(
+          flags_obj),
       parallel_eval_workers=flags_obj.parallel_eval_workers,
       seed=flags_obj.seed,
       progress_reporter=progress_reporter,

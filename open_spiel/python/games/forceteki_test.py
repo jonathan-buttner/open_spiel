@@ -204,6 +204,7 @@ class ForcetekiTest(absltest.TestCase):
         )
     }
     forceteki._TRACE_GLOBAL_ACTION_COUNT = 0
+    forceteki._TRACE_NEXT_WORKER_ID = 0
 
   def tearDown(self):
     forceteki.close_all_workers()
@@ -657,6 +658,104 @@ class ForcetekiTest(absltest.TestCase):
     self.assertEqual(entry["postAction"]["terminalReason"],
                      "forceteki_terminal")
     self.close_forceteki_states(state)
+
+  def test_trace_mode_off_does_not_create_worker_trace_files(self):
+    self.patch_node_worker()
+    with tempfile.TemporaryDirectory() as temp_dir:
+      game = pyspiel.load_game("python_forceteki_swu", {
+          "trace_mode": "off",
+          "trace_dir": temp_dir,
+      })
+      state = game.new_initial_state()
+
+      state.apply_action(1)
+
+      self.assertEmpty(os.listdir(temp_dir))
+      self.close_forceteki_states(state)
+
+  def test_explicit_trace_mode_off_ignores_legacy_trace_path(self):
+    self.patch_node_worker()
+    trace_path = os.path.join(tempfile.mkdtemp(), "trace.ndjson")
+    os.environ["FORCETEKI_TRACE_PATH"] = trace_path
+    game = pyspiel.load_game("python_forceteki_swu", {
+        "trace_mode": "off",
+        "trace_mode_explicit": True,
+    })
+    state = game.new_initial_state()
+
+    state.apply_action(1)
+
+    self.assertFalse(os.path.exists(trace_path))
+    self.close_forceteki_states(state)
+
+  def test_trace_mode_full_appends_games_to_worker_file(self):
+    self.patch_node_worker()
+    with tempfile.TemporaryDirectory() as temp_dir:
+      game = pyspiel.load_game("python_forceteki_swu", {
+          "worker_pool_size": 1,
+          "trace_mode": "full",
+          "trace_dir": temp_dir,
+      })
+      first = game.new_initial_state()
+      first.apply_action(1)
+      first.close()
+      second = game.new_initial_state()
+      second.apply_action(1)
+      second.close()
+
+      trace_path = os.path.join(temp_dir, "worker-0000.ndjson")
+      with open(trace_path, encoding="utf-8") as trace_file:
+        entries = [json.loads(line) for line in trace_file]
+
+      self.assertLen(FakeNodeWorker.instances, 1)
+      self.assertLen(entries, 2)
+      self.close_forceteki_states(first, second)
+
+  def test_trace_mode_minimal_replaces_worker_file_for_next_game(self):
+    self.patch_node_worker()
+    with tempfile.TemporaryDirectory() as temp_dir:
+      game = pyspiel.load_game("python_forceteki_swu", {
+          "worker_pool_size": 1,
+          "trace_mode": "minimal",
+          "trace_dir": temp_dir,
+      })
+      first = game.new_initial_state()
+      first.apply_action(1)
+      first.close()
+      second = game.new_initial_state()
+      second.apply_action(1)
+      second.close()
+
+      trace_path = os.path.join(temp_dir, "worker-0000.ndjson")
+      with open(trace_path, encoding="utf-8") as trace_file:
+        entries = [json.loads(line) for line in trace_file]
+
+      self.assertLen(FakeNodeWorker.instances, 1)
+      self.assertLen(entries, 1)
+      self.assertEqual(entries[0]["globalActionCount"], 2)
+      self.close_forceteki_states(first, second)
+
+  def test_trace_files_are_split_by_checked_out_worker(self):
+    self.patch_node_worker()
+    with tempfile.TemporaryDirectory() as temp_dir:
+      game = pyspiel.load_game("python_forceteki_swu", {
+          "worker_pool_size": 2,
+          "trace_mode": "full",
+          "trace_dir": temp_dir,
+      })
+      first = game.new_initial_state()
+      second = game.new_initial_state()
+
+      first.apply_action(1)
+      second.apply_action(1)
+
+      for worker_id in range(2):
+        trace_path = os.path.join(temp_dir, f"worker-{worker_id:04d}.ndjson")
+        with open(trace_path, encoding="utf-8") as trace_file:
+          entries = [json.loads(line) for line in trace_file]
+        self.assertLen(entries, 1)
+
+      self.close_forceteki_states(first, second)
 
   def test_state_close_is_idempotent(self):
     game = pyspiel.load_game("python_forceteki_swu")
