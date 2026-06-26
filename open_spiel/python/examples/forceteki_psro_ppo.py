@@ -284,6 +284,13 @@ class ForcetekiPPOPolicy(policy.Policy):
     copied.unfreeze()
     return copied
 
+  def rollout_snapshot(self):
+    """Returns a frozen actor copy for parallel rollout collection."""
+    copied = ForcetekiPPOPolicy(self._env, self._player_id, **self._kwargs)
+    copied._network.load_state_dict(self.get_weights())
+    copied.freeze()
+    return copied
+
   def action_probabilities(self, state, player_id=None):
     del player_id
     pack = self._factorizer.pack(state)
@@ -319,6 +326,28 @@ class ForcetekiPPOPolicy(policy.Policy):
     }
     self._pending_reward = 0.0
     return int(action)
+
+  def collect_training_action(self, state):
+    """Samples a PPO action and transition without mutating learner state."""
+    pack = self._factorizer.pack(state)
+    obs = self._obs_tensor(state)
+    with torch.no_grad():
+      outputs = self._network(obs)
+      action, logprob, value = self._sample_action(outputs, pack)
+    transition = {
+        "obs": obs.squeeze(0).detach().cpu(),
+        "pack": pack,
+        "action": int(action),
+        "logprob": float(logprob.detach().cpu()),
+        "value": float(value.detach().cpu()),
+    }
+    return int(action), transition
+
+  def merge_training_episode(self, transitions):
+    """Merges one collected rollout into the learner buffer."""
+    self._buffer.extend(transitions)
+    if len(self._buffer) >= self._kwargs["steps_per_batch"]:
+      self._learn()
 
   def add_pending_reward(self, reward):
     if self._pending is not None:

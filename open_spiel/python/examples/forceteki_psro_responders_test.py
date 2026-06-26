@@ -20,6 +20,7 @@ def _flags(**overrides):
       "number_policies_selected": 1,
       "output_dir": "/tmp/forceteki_psro_test",
       "parallel_eval_workers": 1,
+      "parallel_training_workers": 1,
       "progress": False,
       "progress_interval_seconds": 30.0,
       "rectifier": "",

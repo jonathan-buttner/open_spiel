@@ -59,11 +59,11 @@ flags.DEFINE_integer("max_episode_steps", 1000,
                      "OpenSpiel-side cap for Forceteki rollout length.")
 flags.DEFINE_integer("forceteki_worker_pool_size", 0,
                      "Max reusable Forceteki Node workers. Zero disables "
-                     "worker pooling.")
+                     "worker pooling. If smaller than the requested parallel "
+                     "training/evaluation workers, the effective pool is "
+                     "raised automatically.")
 flags.DEFINE_integer("parallel_eval_workers", 1,
-                     "Threads used for evaluation rollouts. Values greater "
-                     "than one require --forceteki_worker_pool_size to be at "
-                     "least this large.")
+                     "Threads used for evaluation rollouts.")
 
 flags.DEFINE_string("meta_strategy_method", "uniform",
                     "Meta-strategy method: uniform, nash, alpharank, or prd.")
@@ -85,6 +85,9 @@ flags.DEFINE_string("oracle_type", "PG",
                     "RL oracle type. Supported: PG, DQN, PPO.")
 flags.DEFINE_integer("number_training_episodes", 10,
                      "Training episodes per RL policy per PSRO iteration.")
+flags.DEFINE_integer("parallel_training_workers", 1,
+                     "Threads used for PPO training rollouts. PG/DQN training "
+                     "remains serial.")
 flags.DEFINE_float("self_play_proportion", 0.0,
                    "Probability of replacing sampled opponents with self-play.")
 flags.DEFINE_integer("hidden_layer_size", 256, "Hidden layer size.")
@@ -172,12 +175,19 @@ def _debug_mode_from_flags(flags_obj):
   return debug_value
 
 
+def _effective_worker_pool_size(flags_obj):
+  return max(
+      int(getattr(flags_obj, "forceteki_worker_pool_size", 0)),
+      int(getattr(flags_obj, "parallel_eval_workers", 1)),
+      int(getattr(flags_obj, "parallel_training_workers", 1)))
+
+
 def _game_params_from_flags(flags_obj):
   debug_mode = _debug_mode_from_flags(flags_obj)
   params = {
       "players": flags_obj.n_players,
       "max_game_length": flags_obj.max_episode_steps,
-      "worker_pool_size": flags_obj.forceteki_worker_pool_size,
+      "worker_pool_size": _effective_worker_pool_size(flags_obj),
       "seed": str(flags_obj.seed),
       "trace_mode": debug_mode,
       "trace_mode_explicit": True,
@@ -253,38 +263,41 @@ def _restore_resume_state(flags_obj, env):
       f"{flags_obj.resume_from}")
 
 
-def main(argv):
-  if len(argv) > 1:
-    raise app.UsageError("Too many command-line arguments.")
-  if FLAGS.n_players != 2:
+def _validate_flags(flags_obj):
+  if flags_obj.n_players != 2:
     raise app.UsageError("Forceteki SWU only supports --n_players=2")
-  if FLAGS.parallel_eval_workers < 1:
+  if flags_obj.parallel_eval_workers < 1:
     raise app.UsageError("--parallel_eval_workers must be at least 1")
-  if FLAGS.forceteki_worker_pool_size < 0:
+  if flags_obj.parallel_training_workers < 1:
+    raise app.UsageError("--parallel_training_workers must be at least 1")
+  if flags_obj.forceteki_worker_pool_size < 0:
     raise app.UsageError("--forceteki_worker_pool_size must be non-negative")
-  if (FLAGS.parallel_eval_workers > 1 and
-      FLAGS.forceteki_worker_pool_size < FLAGS.parallel_eval_workers):
-    raise app.UsageError(
-        "--parallel_eval_workers > 1 requires "
-        "--forceteki_worker_pool_size >= --parallel_eval_workers")
-  if FLAGS.resume_from and FLAGS.init_policy_from:
+  if flags_obj.resume_from and flags_obj.init_policy_from:
     raise app.UsageError("--resume_from and --init_policy_from are exclusive")
-  if ((FLAGS.output_dir or FLAGS.resume_from or FLAGS.init_policy_from) and
-      FLAGS.oracle_type.upper() != "PPO"):
+  if ((flags_obj.output_dir or flags_obj.resume_from or
+       flags_obj.init_policy_from) and flags_obj.oracle_type.upper() != "PPO"):
     raise app.UsageError(
         "Reloadable Forceteki artifacts currently support --oracle_type=PPO")
-  if bool(FLAGS.player0_deck_path) != bool(FLAGS.player1_deck_path):
+  if bool(flags_obj.player0_deck_path) != bool(flags_obj.player1_deck_path):
     raise app.UsageError(
         "--player0_deck_path and --player1_deck_path must be provided together")
-  if FLAGS.decks_path and (FLAGS.player0_deck_path or FLAGS.player1_deck_path):
+  if (flags_obj.decks_path and
+      (flags_obj.player0_deck_path or flags_obj.player1_deck_path)):
     raise app.UsageError(
         "Use either --decks_path or per-player deck paths, not both")
   resolved_deck_pool_path = (
-      FLAGS.deck_pool_path or os.environ.get("FORCETEKI_DECK_POOL_PATH"))
-  if resolved_deck_pool_path and (FLAGS.decks_path or FLAGS.player0_deck_path):
+      flags_obj.deck_pool_path or os.environ.get("FORCETEKI_DECK_POOL_PATH"))
+  if (resolved_deck_pool_path and
+      (flags_obj.decks_path or flags_obj.player0_deck_path)):
     raise app.UsageError(
         "Use either deck_pool_path/FORCETEKI_DECK_POOL_PATH or fixed deck "
         "paths, not both")
+
+
+def main(argv):
+  if len(argv) > 1:
+    raise app.UsageError("Too many command-line arguments.")
+  _validate_flags(FLAGS)
 
   np.random.seed(FLAGS.seed)
   os.environ["FORCETEKI_SEED"] = str(FLAGS.seed)

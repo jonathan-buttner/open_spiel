@@ -25,7 +25,10 @@ def _flags(**overrides):
       "forceteki_worker_pool_size": 0,
       "max_episode_steps": 1000,
       "n_players": 2,
+      "oracle_type": "PPO",
       "output_dir": "",
+      "parallel_eval_workers": 1,
+      "parallel_training_workers": 1,
       "player0_deck_path": "",
       "player1_deck_path": "",
       "ppo_device": "cpu",
@@ -46,7 +49,34 @@ class ForcetekiPsroTest(absltest.TestCase):
 
     self.assertEqual(params["seed"], "23")
     self.assertEqual(params["trace_mode"], "off")
+    self.assertEqual(params["worker_pool_size"], 1)
     self.assertNotIn("trace_dir", params)
+
+  def test_parallel_training_workers_must_be_positive(self):
+    with self.assertRaisesRegex(app.UsageError,
+                                "--parallel_training_workers"):
+      forceteki_psro._validate_flags(_flags(parallel_training_workers=0))
+
+  def test_effective_worker_pool_uses_training_workers(self):
+    params = forceteki_psro._game_params_from_flags(
+        _flags(parallel_training_workers=4))
+
+    self.assertEqual(params["worker_pool_size"], 4)
+
+  def test_effective_worker_pool_uses_eval_workers(self):
+    params = forceteki_psro._game_params_from_flags(
+        _flags(parallel_eval_workers=3))
+
+    self.assertEqual(params["worker_pool_size"], 3)
+
+  def test_effective_worker_pool_preserves_larger_explicit_pool(self):
+    params = forceteki_psro._game_params_from_flags(
+        _flags(
+            forceteki_worker_pool_size=8,
+            parallel_eval_workers=3,
+            parallel_training_workers=4))
+
+    self.assertEqual(params["worker_pool_size"], 8)
 
   def test_game_params_include_trace_dir_when_debug_enabled(self):
     with tempfile.TemporaryDirectory() as temp_dir:
