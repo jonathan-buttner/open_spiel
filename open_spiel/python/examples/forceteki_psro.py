@@ -85,6 +85,9 @@ flags.DEFINE_string("oracle_type", "PG",
                     "RL oracle type. Supported: PG, DQN, PPO.")
 flags.DEFINE_integer("number_training_episodes", 10,
                      "Training episodes per RL policy per PSRO iteration.")
+flags.DEFINE_integer("forceteki_crash_retry_limit", 10,
+                     "Consecutive training rollout crashes to capture and "
+                     "retry before aborting. Zero disables crash recovery.")
 flags.DEFINE_float("self_play_proportion", 0.0,
                    "Probability of replacing sampled opponents with self-play.")
 flags.DEFINE_integer("hidden_layer_size", 256, "Hidden layer size.")
@@ -174,15 +177,19 @@ def _debug_mode_from_flags(flags_obj):
 
 def _game_params_from_flags(flags_obj):
   debug_mode = _debug_mode_from_flags(flags_obj)
+  crash_retry_limit = int(getattr(flags_obj, "forceteki_crash_retry_limit", 10))
+  trace_mode = debug_mode
+  if crash_retry_limit > 0 and debug_mode == "off":
+    trace_mode = "minimal"
   params = {
       "players": flags_obj.n_players,
       "max_game_length": flags_obj.max_episode_steps,
       "worker_pool_size": flags_obj.forceteki_worker_pool_size,
       "seed": str(flags_obj.seed),
-      "trace_mode": debug_mode,
+      "trace_mode": trace_mode,
       "trace_mode_explicit": True,
   }
-  if debug_mode != "off":
+  if trace_mode != "off":
     params["trace_dir"] = _debug_trace_dir(flags_obj.debug_dir)
   deck_pool_path = (
       flags_obj.deck_pool_path or os.environ.get("FORCETEKI_DECK_POOL_PATH"))
@@ -262,6 +269,8 @@ def main(argv):
     raise app.UsageError("--parallel_eval_workers must be at least 1")
   if FLAGS.forceteki_worker_pool_size < 0:
     raise app.UsageError("--forceteki_worker_pool_size must be non-negative")
+  if FLAGS.forceteki_crash_retry_limit < 0:
+    raise app.UsageError("--forceteki_crash_retry_limit must be non-negative")
   if (FLAGS.parallel_eval_workers > 1 and
       FLAGS.forceteki_worker_pool_size < FLAGS.parallel_eval_workers):
     raise app.UsageError(

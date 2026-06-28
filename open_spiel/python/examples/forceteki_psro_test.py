@@ -22,6 +22,7 @@ def _flags(**overrides):
       "decks_path": "",
       "debug": "off",
       "debug_dir": "forceteki_psro_debug",
+      "forceteki_crash_retry_limit": 10,
       "forceteki_worker_pool_size": 0,
       "max_episode_steps": 1000,
       "n_players": 2,
@@ -42,11 +43,22 @@ class ForcetekiPsroTest(absltest.TestCase):
     self.assertNotIn("forceteki_seed", flags.FLAGS)
 
   def test_game_params_use_seed_flag_for_forceteki_seed(self):
-    params = forceteki_psro._game_params_from_flags(_flags(seed=23))
+    params = forceteki_psro._game_params_from_flags(
+        _flags(seed=23, forceteki_crash_retry_limit=0))
 
     self.assertEqual(params["seed"], "23")
     self.assertEqual(params["trace_mode"], "off")
     self.assertNotIn("trace_dir", params)
+
+  def test_default_crash_retry_enables_minimal_trace_dir(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      params = forceteki_psro._game_params_from_flags(
+          _flags(debug="off", debug_dir=temp_dir))
+
+      self.assertEqual(params["trace_mode"], "minimal")
+      self.assertIn("trace_dir", params)
+      self.assertTrue(os.path.isdir(params["trace_dir"]))
+      self.assertTrue(params["trace_dir"].startswith(temp_dir))
 
   def test_game_params_include_trace_dir_when_debug_enabled(self):
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -57,6 +69,14 @@ class ForcetekiPsroTest(absltest.TestCase):
       self.assertIn("trace_dir", params)
       self.assertTrue(os.path.isdir(params["trace_dir"]))
       self.assertTrue(params["trace_dir"].startswith(temp_dir))
+
+  def test_debug_minimal_keeps_requested_mode_with_retry_enabled(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      params = forceteki_psro._game_params_from_flags(
+          _flags(debug="minimal", debug_dir=temp_dir))
+
+      self.assertEqual(params["trace_mode"], "minimal")
+      self.assertIn("trace_dir", params)
 
   def test_debug_rejects_boolean_values(self):
     for debug_value in ("True", "False", True, False):

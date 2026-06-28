@@ -49,7 +49,8 @@ def init_pg_responder(env, flags_obj):
       number_training_episodes=flags_obj.number_training_episodes,
       self_play_proportion=flags_obj.self_play_proportion,
       sigma=flags_obj.sigma,
-      seed=flags_obj.seed)
+      seed=flags_obj.seed,
+      crash_retry_limit=flags_obj.forceteki_crash_retry_limit)
   agents = [agent_class(env, player_id, **agent_kwargs)
             for player_id in range(flags_obj.n_players)]
   for agent in agents:
@@ -80,7 +81,8 @@ def init_dqn_responder(env, flags_obj):
       number_training_episodes=flags_obj.number_training_episodes,
       self_play_proportion=flags_obj.self_play_proportion,
       sigma=flags_obj.sigma,
-      seed=flags_obj.seed)
+      seed=flags_obj.seed,
+      crash_retry_limit=flags_obj.forceteki_crash_retry_limit)
   agents = [agent_class(env, player_id, **agent_kwargs)
             for player_id in range(flags_obj.n_players)]
   for agent in agents:
@@ -122,7 +124,8 @@ def init_ppo_responder(env, flags_obj):
       number_training_episodes=flags_obj.number_training_episodes,
       self_play_proportion=flags_obj.self_play_proportion,
       sigma=flags_obj.sigma,
-      seed=flags_obj.seed)
+      seed=flags_obj.seed,
+      crash_retry_limit=flags_obj.forceteki_crash_retry_limit)
   agents = [agent_class(env, player_id, **agent_kwargs)
             for player_id in range(flags_obj.n_players)]
   for agent in agents:
@@ -205,6 +208,9 @@ def _run_psro(env, oracle, agents, flags_obj, game_params, output,
       enabled=getattr(flags_obj, "progress", True),
       interval_seconds=getattr(flags_obj, "progress_interval_seconds", 30.0),
       output=output)
+  if hasattr(oracle, "set_crash_recovery_context"):
+    oracle.set_crash_recovery_context(
+        debug_dir=game_params.get("trace_dir", ""), output=output)
   if hasattr(oracle, "set_progress_reporter"):
     oracle.set_progress_reporter(progress_reporter)
 
